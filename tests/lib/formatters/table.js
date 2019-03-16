@@ -9,6 +9,7 @@
 //------------------------------------------------------------------------------
 
 const assert = require("chai").assert,
+    chalk = require("chalk"),
     formatter = require("../../../lib/formatters/table");
 
 //------------------------------------------------------------------------------
@@ -16,6 +17,16 @@ const assert = require("chai").assert,
 //------------------------------------------------------------------------------
 
 describe("formatter:table", () => {
+    let originalChalkEnabled;
+
+    before(() => {
+        originalChalkEnabled = chalk.enabled;
+        chalk.enabled = false;
+    });
+    after(() => {
+        chalk.enabled = originalChalkEnabled;
+    });
+
     describe("when passed no messages", () => {
         const code = [
             {

@@ -12,7 +12,7 @@
 const assert = require("chai").assert,
     path = require("path"),
     os = require("os"),
-    IgnoredPaths = require("../../../lib/util/ignored-paths.js"),
+    { IgnoredPaths } = require("../../../lib/lookup/ignored-paths.js"),
     sinon = require("sinon"),
     fs = require("fs"),
     includes = require("lodash").includes;
@@ -386,14 +386,21 @@ describe("IgnoredPaths", () => {
                 .withArgs(".eslintignore")
                 .returns("subdir\r\n");
             sinon.stub(fs, "statSync")
-                .withArgs("subdir")
-                .returns();
-            const ignoredPaths = new IgnoredPaths({ ignore: true, ignorePath: ".eslintignore", cwd: getFixturePath() });
+                .withArgs(".eslintignore")
+                .returns({
+                    isFile() {
+                        return true;
+                    }
+                });
 
-            assert.isTrue(ignoredPaths.contains(getFixturePath("subdir/undef.js")));
+            try {
+                const ignoredPaths = new IgnoredPaths({ ignore: true, ignorePath: ".eslintignore", cwd: getFixturePath() });
 
-            fs.readFileSync.restore();
-            fs.statSync.restore();
+                assert.isTrue(ignoredPaths.contains(getFixturePath("subdir/undef.js")));
+            } finally {
+                fs.readFileSync.restore();
+                fs.statSync.restore();
+            }
         });
 
         it("should return false for file not matching any ignore pattern", () => {

@@ -11,7 +11,7 @@
 const path = require("path"),
     assert = require("chai").assert,
     leche = require("leche"),
-    ModuleResolver = require("../../../lib/util/module-resolver");
+    { ModuleResolver } = require("../../../lib/lookup/module-resolver");
 
 //------------------------------------------------------------------------------
 // Data
@@ -37,8 +37,7 @@ describe("ModuleResolver", () => {
 
         ], (name, lookupPath, expected) => {
             it("should find the correct location of a file", () => {
-                const resolver = new ModuleResolver(),
-                    result = resolver.resolve(name, lookupPath);
+                const result = ModuleResolver.resolve(name, lookupPath);
 
                 assert.strictEqual(result, expected);
             });

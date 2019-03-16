@@ -1,11 +1,9 @@
-ESLint couldn't find the plugin "<%- pluginName %>". This can happen for a couple different reasons:
+ESLint couldn't find the plugin "<%- pluginName %>".
 
-1. If ESLint is installed globally, then make sure <%- pluginName %> is also installed globally. A globally-installed ESLint cannot find a locally-installed plugin.
+Please make sure the plugin "<%- pluginName %>" is installed locally regardless of ESLint itself was installed globally or locally.
 
-2. If ESLint is installed locally, then it's likely that the plugin isn't installed correctly. Try reinstalling by running the following:
+    npm i <%- pluginName %> --save-dev
 
-    npm i <%- pluginName %>@latest --save-dev
-
-Path to ESLint package: <%- eslintPath %>
+Path to the project root: <%- projectRoot %>
 
 If you still can't figure out the problem, please stop by https://gitter.im/eslint/eslint to chat with the team.

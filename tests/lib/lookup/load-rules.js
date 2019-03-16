@@ -6,7 +6,7 @@
 "use strict";
 
 const assert = require("chai").assert;
-const loadRules = require("../../lib/load-rules");
+const loadRules = require("../../../lib/lookup/load-rules");
 
 describe("when given an invalid rules directory", () => {
     it("should throw an error", () => {
@@ -20,6 +20,6 @@ describe("when given a valid rules directory", () => {
     it("should load rules and not throw an error", () => {
         const rules = loadRules("tests/fixtures/rules", process.cwd());
 
-        assert.strictEqual(rules["fixture-rule"], require.resolve("../../tests/fixtures/rules/fixture-rule"));
+        assert.strictEqual(rules["fixture-rule"], require.resolve("../../fixtures/rules/fixture-rule"));
     });
 });
