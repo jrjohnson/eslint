@@ -4,12 +4,46 @@
  */
 "use strict";
 
+const path = require("path");
 const { assert } = require("chai");
-const { ConfigArray } = require("../../../lib/lookup/config-array");
+const { ConfigArray, getUsedExtractedConfigs } = require("../../../lib/lookup/config-array");
 const { OverrideTester } = require("../../../lib/lookup/override-tester");
 
 describe("ConfigArray", () => {
-    describe("'isRoot()' should the value of the last element which has 'root' property.", () => {
+    it("should be a sub class of Array.", () => {
+        assert(new ConfigArray() instanceof Array);
+    });
+
+    describe("'constructor(...elements)' should adopt the elements as array elements.", () => {
+        const patterns = [
+            { elements: [] },
+            { elements: [{ value: 1 }] },
+            { elements: [{ value: 2 }, { value: 3 }] },
+            { elements: [{ value: 4 }, { value: 5 }, { value: 6 }] }
+        ];
+
+        for (const { elements } of patterns) {
+            describe(`if it gave ${JSON.stringify(elements)} then`, () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = new ConfigArray(...elements);
+                });
+
+                it(`should have ${elements.length} as the length.`, () => {
+                    assert.strictEqual(configArray.length, elements.length);
+                });
+
+                for (let i = 0; i < elements.length; ++i) {
+                    it(`should have ${JSON.stringify(elements[i])} at configArray[${i}].`, () => { // eslint-disable-line no-loop-func
+                        assert.strictEqual(configArray[i], elements[i]);
+                    });
+                }
+            });
+        }
+    });
+
+    describe("'isRoot()' method should the value of the last element which has 'root' property.", () => {
         const patterns = [
             { elements: [], expected: false },
             { elements: [{}], expected: false },
@@ -28,28 +62,147 @@ describe("ConfigArray", () => {
         }
     });
 
-    describe("'getPluginEnvironment(id)' retrieves the environments of used plugins.", () => {
+    describe("'getPluginEnvironment(id)' method retrieves the environments of all plugins.", () => {
+        const env = {
+            "aaa/xxx": {},
+            "bbb/xxx": {}
+        };
+        let configArray;
+
+        beforeEach(() => {
+            configArray = new ConfigArray(
+                {
+                    plugins: {
+                        aaa: {
+                            definition: {
+                                environments: {
+                                    xxx: env["aaa/xxx"]
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    plugins: {
+                        bbb: {
+                            definition: {
+                                environments: {
+                                    xxx: env["bbb/xxx"]
+                                }
+                            }
+                        }
+                    }
+                }
+            );
+        });
+
+        it("should return null for built-in env", () => {
+            assert.strictEqual(configArray.getPluginEnvironment("node"), null);
+        });
+
+        it("should return 'aaa/xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginEnvironment("aaa/xxx"), env["aaa/xxx"]);
+        });
+
+        it("should return 'bbb/xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginEnvironment("bbb/xxx"), env["bbb/xxx"]);
+        });
     });
 
-    describe("'extractConfig(filePath)' retrieves the merged config for a given file.", () => {
-        it("should throw an error if no arguments were given.", () => {
-            assert.throws(() => {
-                new ConfigArray().extractConfig();
-            }, "'filePath' should be an absolute path, but got undefined.");
+    describe("'getPluginProcessor(id)' method retrieves the processors of all plugins.", () => {
+        const processors = {
+            "aaa/.xxx": {},
+            "bbb/.xxx": {}
+        };
+        let configArray;
+
+        beforeEach(() => {
+            configArray = new ConfigArray(
+                {
+                    plugins: {
+                        aaa: {
+                            definition: {
+                                processors: {
+                                    ".xxx": processors["aaa/.xxx"]
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    plugins: {
+                        bbb: {
+                            definition: {
+                                processors: {
+                                    ".xxx": processors["bbb/.xxx"]
+                                }
+                            }
+                        }
+                    }
+                }
+            );
         });
 
-        it("should throw an error if a non-string value was given.", () => {
-            assert.throws(() => {
-                new ConfigArray().extractConfig(100);
-            }, "'filePath' should be an absolute path, but got 100.");
+        it("should return 'aaa/.xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginProcessor("aaa/.xxx"), processors["aaa/.xxx"]);
         });
 
-        it("should throw an error if a relative path was given.", () => {
-            assert.throws(() => {
-                new ConfigArray().extractConfig("foo/bar.js");
-            }, "'filePath' should be an absolute path, but got foo/bar.js.");
+        it("should return both 'bbb/.xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginProcessor("bbb/.xxx"), processors["bbb/.xxx"]);
+        });
+    });
+
+    describe("'getPluginRule(id)' method retrieves the rules of all plugins.", () => {
+        const rules = {
+            "aaa/xxx": {},
+            "bbb/xxx": {}
+        };
+        let configArray;
+
+        beforeEach(() => {
+            configArray = new ConfigArray(
+                {
+                    plugins: {
+                        aaa: {
+                            definition: {
+                                rules: {
+                                    xxx: rules["aaa/xxx"]
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    plugins: {
+                        bbb: {
+                            definition: {
+                                rules: {
+                                    xxx: rules["bbb/xxx"]
+                                }
+                            }
+                        }
+                    }
+                }
+            );
         });
 
+        it("should return null for built-in rules", () => {
+            assert.strictEqual(configArray.getPluginRule("eqeqeq"), null);
+        });
+
+        it("should return 'aaa/xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginRule("aaa/xxx"), rules["aaa/xxx"]);
+        });
+
+        it("should return 'bbb/xxx' if it exists.", () => {
+            assert.strictEqual(configArray.getPluginRule("bbb/xxx"), rules["bbb/xxx"]);
+        });
+    });
+
+    describe("'extractConfig(filePath)' method retrieves the merged config for a given file.", () => {
         it("should throw an error if a 'parser' has the loading error.", () => {
             assert.throws(() => {
                 new ConfigArray(
@@ -108,6 +261,72 @@ describe("ConfigArray", () => {
             ).extractConfig(__filename);
 
             assert.deepStrictEqual(config.plugins, {});
+        });
+
+        it("should not merge the elements which were not matched.", () => {
+            const config = new ConfigArray(
+                {
+                    rules: {
+                        "no-redeclare": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [], process.cwd()),
+                    rules: {
+                        "no-undef": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [path.basename(__filename)], process.cwd()),
+                    rules: {
+                        "no-use-before-define": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    rules: {
+                        "no-unused-vars": "error"
+                    }
+                }
+            ).extractConfig(__filename);
+
+            assert.deepStrictEqual(config.rules, {
+                "no-redeclare": ["error"],
+                "no-undef": ["error"]
+            });
+        });
+
+        it("should return the same instance for every the same matching.", () => {
+            const configArray = new ConfigArray(
+                {
+                    rules: {
+                        "no-redeclare": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [], process.cwd()),
+                    rules: {
+                        "no-undef": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [path.basename(__filename)], process.cwd()),
+                    rules: {
+                        "no-use-before-define": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    rules: {
+                        "no-unused-vars": "error"
+                    }
+                }
+            );
+
+            assert.strictEqual(
+                configArray.extractConfig(path.join(__dirname, "a.js")),
+                configArray.extractConfig(path.join(__dirname, "b.js"))
+            );
         });
 
         describe("Moved from 'merge()' in tests/lib/config/config-ops.js", () => {
@@ -402,6 +621,87 @@ describe("ConfigArray", () => {
                 assert(b.settings.bar === 1);
                 assert(result.settings.bar === 2);
             });
+        });
+    });
+
+    describe("'getUsedExtractedConfigs(instance)' function retrieves used extracted configs from the instance's internal cache.", () => {
+        let configArray;
+
+        beforeEach(() => {
+            configArray = new ConfigArray(
+                {
+                    rules: {
+                        "no-redeclare": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [], process.cwd()),
+                    rules: {
+                        "no-undef": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.js"], [path.basename(__filename)], process.cwd()),
+                    rules: {
+                        "no-use-before-define": "error"
+                    }
+                },
+                {
+                    criteria: OverrideTester.create(["*.ts"], [], process.cwd()),
+                    rules: {
+                        "no-unused-vars": "error"
+                    }
+                }
+            );
+        });
+
+        it("should return empty array before it called 'extractConfig(filePath)'.", () => {
+            assert.deepStrictEqual(getUsedExtractedConfigs(configArray), []);
+        });
+
+        for (const { filePaths } of [
+            { filePaths: [__filename] },
+            { filePaths: [__filename, `${__filename}.ts`] },
+            { filePaths: [__filename, `${__filename}.ts`, path.join(__dirname, "foo.js")] }
+        ]) {
+            describe(`after it called 'extractConfig(filePath)' ${filePaths.length} time(s) with ${JSON.stringify(filePaths, null, 4)}, the returned array`, () => { // eslint-disable-line no-loop-func
+                let configs;
+                let usedConfigs;
+
+                beforeEach(() => {
+                    configs = filePaths.map(filePath => configArray.extractConfig(filePath));
+                    usedConfigs = getUsedExtractedConfigs(configArray);
+                });
+
+                it(`should have ${filePaths.length} as the length.`, () => {
+                    assert.strictEqual(usedConfigs.length, configs.length);
+                });
+
+                for (let i = 0; i < filePaths.length; ++i) {
+                    it(`should contain 'configs[${i}]'.`, () => { // eslint-disable-line no-loop-func
+                        assert(usedConfigs.includes(configs[i]));
+                    });
+                }
+            });
+        }
+
+        it("should not contain duplicate values.", () => {
+            const configs = [
+                configArray.extractConfig(__filename),
+                configArray.extractConfig(`${__filename}.ts`),
+                configArray.extractConfig(path.join(__dirname, "foo.js"))
+            ];
+
+            configArray.extractConfig(__filename);
+            configArray.extractConfig(path.join(__dirname, "foo.js"));
+            configArray.extractConfig(path.join(__dirname, "bar.js"));
+            configArray.extractConfig(path.join(__dirname, "baz.js"));
+
+            const usedConfigs = getUsedExtractedConfigs(configArray);
+
+            assert.deepStrictEqual(usedConfigs.filter(c => c === configs[0]).length, 1);
+            assert.deepStrictEqual(usedConfigs.filter(c => c === configs[1]).length, 1);
+            assert.deepStrictEqual(usedConfigs.filter(c => c === configs[2]).length, 1);
         });
     });
 });
