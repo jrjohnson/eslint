@@ -8,49 +8,26 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { assert } = require("chai");
-const mockFs = require("mock-fs");
 const sh = require("shelljs");
 const sinon = require("sinon");
 const { ConfigArrayFactory } = require("../../../lib/lookup/config-array-factory");
 const { ExtractedConfig } = require("../../../lib/lookup/extracted-config");
 const { FileEnumerator } = require("../../../lib/lookup/file-enumerator");
 const { IgnoredPaths } = require("../../../lib/lookup/ignored-paths");
-const { ModuleResolver } = require("../../../lib/lookup/module-resolver");
-
-const proxyquire = require("proxyquire").noCallThru().noPreserveCache();
-
-// Needs to load lazy loading modules before mocking fs.
-require("js-yaml");
+const { defineFileEnumeratorWithInmemoryFileSystem } = require("./_utils");
 
 /**
- * Creates a stubbed FileEnumerator object that will load plugins by name from the objects specified.
+ * Creates a stubbed FileEnumerator object that will use the in-memory file system.
  * @param {Object} options The options for FileEnumerator.
- * @param {Object} plugins The keys are the package names, values are plugin objects.
+ * @param {Object} files The file definitions in the in-memory file system.
  * @returns {FileEnumerator} The stubbed instance of Config.
  * @private
  */
-function createStubbedFileEnumerator(options, plugins) {
-    const { ConfigArrayFactory: StubbedConfigArrayFactory } = proxyquire(
-        "../../../lib/lookup/config-array-factory",
-        {
-            ...plugins,
-            "./module-resolver": {
-                ModuleResolver: {
-                    resolve(request, relativeTo) {
-                        if (plugins.hasOwnProperty(request)) { // eslint-disable-line no-prototype-builtins
-                            return request;
-                        }
-                        return ModuleResolver.resolve(request, relativeTo);
-                    }
-                }
-            }
-        }
-    );
+function createStubbedFileEnumerator(options, files) {
+    const { FileEnumerator: StubbedFileEnumerator } =
+        defineFileEnumeratorWithInmemoryFileSystem({ files });
 
-    return new FileEnumerator({
-        ...options,
-        configArrayFactory: new StubbedConfigArrayFactory(options)
-    });
+    return new StubbedFileEnumerator(options);
 }
 
 describe("FileEnumerator", () => {
@@ -348,17 +325,6 @@ describe("FileEnumerator", () => {
         }
 
         /**
-         * Mocks the current CWD path
-         * @param {string} fakeCWDPath - fake CWD path
-         * @returns {void}
-         * @private
-         */
-        function mockCWDResponse(fakeCWDPath) {
-            sandbox.stub(process, "cwd")
-                .returns(fakeCWDPath);
-        }
-
-        /**
          * Mocks the current user's home path
          * @param {string} fakeUserHomePath - fake user's home path
          * @returns {void}
@@ -430,11 +396,11 @@ describe("FileEnumerator", () => {
 
             // https://github.com/eslint/eslint/issues/2380
             it("should not modify baseConfig when format is specified", () => {
-                const customBaseConfig = { foo: "bar" };
+                const customBaseConfig = { root: true };
 
                 new FileEnumerator({ baseConfig: customBaseConfig, format: "foo" }); // eslint-disable-line no-new
 
-                assert.deepStrictEqual(customBaseConfig, { foo: "bar" });
+                assert.deepStrictEqual(customBaseConfig, { root: true });
             });
 
             it("should create config object when using baseConfig with extends", () => {
@@ -629,8 +595,6 @@ describe("FileEnumerator", () => {
             });
 
             it("should return a modified config without plugin rules enabled when baseConfig is set to an object with plugin and no .eslintrc", () => {
-                const customRule = require("../../fixtures/rules/custom-rule");
-                const examplePluginName = "eslint-plugin-example";
                 const enumerator = createStubbedFileEnumerator(
                     {
                         baseConfig: {
@@ -640,17 +604,19 @@ describe("FileEnumerator", () => {
                             rules: {
                                 quotes: [2, "single"]
                             },
-                            plugins: [examplePluginName]
+                            plugins: ["eslint-plugin-example"]
                         },
                         useEslintrc: false
                     },
                     {
-                        [examplePluginName]: {
-                            rules: { "example-rule": customRule },
+                        "node_modules/eslint-plugin-example/index.js": `
+                            module.exports = {
+                                rules: { "example-rule": () => ({}) },
 
-                            // rulesConfig support removed in 2.0.0, so this should have no effect
-                            rulesConfig: { "example-rule": 1 }
-                        }
+                                // rulesConfig support removed in 2.0.0, so this should have no effect
+                                rulesConfig: { "example-rule": 1 }
+                            }
+                        `
                     }
                 );
                 const file = getFixturePath("broken", "plugins", "console-wrong-quotes.js");
@@ -838,6 +804,10 @@ describe("FileEnumerator", () => {
 
             // Command line configuration - --plugin
             it("should merge command line plugin with local .eslintrc", () => {
+                const eslintrcPaths = [
+                    getFixturePath("broken", "plugins", ".eslintrc"),
+                    getFixturePath("broken", ".eslintrc")
+                ];
                 const enumerator = createStubbedFileEnumerator(
                     {
                         cliConfig: {
@@ -845,8 +815,10 @@ describe("FileEnumerator", () => {
                         }
                     },
                     {
-                        "eslint-plugin-example": {},
-                        "eslint-plugin-another-plugin": {}
+                        "node_modules/eslint-plugin-example/index.js": "",
+                        "node_modules/eslint-plugin-another-plugin/index.js": "",
+                        [eslintrcPaths[0]]: fs.readFileSync(eslintrcPaths[0], "utf8"),
+                        [eslintrcPaths[1]]: fs.readFileSync(eslintrcPaths[1], "utf8")
                     }
                 );
                 const file = getFixturePath("broken", "plugins", "console-wrong-quotes.js");
@@ -964,35 +936,16 @@ describe("FileEnumerator", () => {
                     return path.join(process.cwd(), "eslint", "fixtures", "config-hierarchy", ...args);
                 }
 
-                /**
-                 * Mocks the file system for personal-config files
-                 * @returns {undefined}
-                 * @private
-                 */
-                function mockPersonalConfigFileSystem() {
-                    mockFs({
-                        eslint: {
-                            fixtures: {
-                                "config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
-                            }
-                        }
-                    });
-                }
-
-                afterEach(() => {
-                    mockFs.restore();
-                });
-
                 it("should load the personal config if no local config was found", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "home-folder");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator({ cwd: projectPath }, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
 
-                    const enumerator = new FileEnumerator();
                     const actual = getConfig(enumerator, filePath);
                     const expected = {
                         rules: {
@@ -1007,12 +960,12 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "home-folder", "project");
                     const homePath = getFakeFixturePath("personal-config", "home-folder");
                     const filePath = getFakeFixturePath("personal-config", "home-folder", "project", "foo.js");
+                    const enumerator = createStubbedFileEnumerator({ cwd: projectPath }, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
 
-                    const enumerator = new FileEnumerator();
                     const actual = getConfig(enumerator, filePath);
                     const expected = {
                         rules: {
@@ -1028,12 +981,18 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "home-folder");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator(
+                        {
+                            cwd: projectPath,
+                            specificConfigPath: configPath
+                        },
+                        {
+                            "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                        }
+                    );
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
 
-                    const enumerator = new FileEnumerator({ specificConfigPath: configPath });
                     const actual = getConfig(enumerator, filePath);
                     const expected = {
                         rules: {
@@ -1047,12 +1006,12 @@ describe("FileEnumerator", () => {
                 it("should still load the project config if the current working directory is the same as the home folder", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-with-config");
                     const filePath = getFakeFixturePath("personal-config", "project-with-config", "subfolder", "foo.js");
+                    const enumerator = createStubbedFileEnumerator({ cwd: projectPath }, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
 
                     mockOsHomedir(projectPath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
 
-                    const enumerator = new FileEnumerator();
                     const actual = getConfig(enumerator, filePath);
                     const expected = {
                         rules: {
@@ -1076,35 +1035,15 @@ describe("FileEnumerator", () => {
                     return path.join(process.cwd(), "eslint", "fixtures", "config-hierarchy", ...args);
                 }
 
-                /**
-                 * Mocks the file system for personal-config files
-                 * @returns {undefined}
-                 * @private
-                 */
-                function mockPersonalConfigFileSystem() {
-                    mockFs({
-                        eslint: {
-                            fixtures: {
-                                "config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
-                            }
-                        }
-                    });
-                }
-
-                afterEach(() => {
-                    mockFs.restore();
-                });
-
                 it("should throw an error if no local config and no personal config was found", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "folder-does-not-exist");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator({ cwd: projectPath }, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
-
-                    const enumerator = new FileEnumerator();
 
                     assert.throws(() => {
                         getConfig(enumerator, filePath);
@@ -1115,12 +1054,11 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "home-folder-with-packagejson");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator({ cwd: projectPath }, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
-
-                    const enumerator = new FileEnumerator();
 
                     assert.throws(() => {
                         getConfig(enumerator, filePath);
@@ -1131,12 +1069,12 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "folder-does-not-exist");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator(
+                        { cwd: projectPath, useEslintrc: false },
+                        { "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY }
+                    );
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
-
-                    const enumerator = new FileEnumerator({ useEslintrc: false });
 
                     getConfig(enumerator, filePath);
                 });
@@ -1145,16 +1083,19 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "folder-does-not-exist");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator(
+                        {
+                            cliConfig: {
+                                rules: { quotes: [2, "single"] }
+                            },
+                            cwd: projectPath
+                        },
+                        {
+                            "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                        }
+                    );
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
-
-                    const enumerator = new FileEnumerator({
-                        cliConfig: {
-                            rules: { quotes: [2, "single"] }
-                        }
-                    });
 
                     getConfig(enumerator, filePath);
                 });
@@ -1163,12 +1104,12 @@ describe("FileEnumerator", () => {
                     const projectPath = getFakeFixturePath("personal-config", "project-without-config");
                     const homePath = getFakeFixturePath("personal-config", "folder-does-not-exist");
                     const filePath = getFakeFixturePath("personal-config", "project-without-config", "foo.js");
+                    const enumerator = createStubbedFileEnumerator(
+                        { baseConfig: {}, cwd: projectPath },
+                        { "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY }
+                    );
 
                     mockOsHomedir(homePath);
-                    mockPersonalConfigFileSystem();
-                    mockCWDResponse(projectPath);
-
-                    const enumerator = new FileEnumerator({ baseConfig: {} });
 
                     getConfig(enumerator, filePath);
                 });
@@ -1186,22 +1127,10 @@ describe("FileEnumerator", () => {
                     return path.join(process.cwd(), "eslint", "fixtures", "config-hierarchy", ...pathSegments);
                 }
 
-                beforeEach(() => {
-                    mockFs({
-                        eslint: {
-                            fixtures: {
-                                "config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
-                            }
-                        }
-                    });
-                });
-
-                afterEach(() => {
-                    mockFs.restore();
-                });
-
                 it("should merge override config when the pattern matches the file name", () => {
-                    const enumerator = new FileEnumerator();
+                    const enumerator = createStubbedFileEnumerator({}, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
                     const targetPath = getFakeFixturePath("overrides", "foo.js");
                     const expected = {
                         rules: {
@@ -1217,7 +1146,9 @@ describe("FileEnumerator", () => {
                 });
 
                 it("should merge override config when the pattern matches the file path relative to the config file", () => {
-                    const enumerator = new FileEnumerator();
+                    const enumerator = createStubbedFileEnumerator({}, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
                     const targetPath = getFakeFixturePath("overrides", "child", "child-one.js");
                     const expected = {
                         rules: {
@@ -1266,7 +1197,9 @@ describe("FileEnumerator", () => {
                 });
 
                 it("should merge all local configs (override and non-override) before non-local configs", () => {
-                    const enumerator = new FileEnumerator();
+                    const enumerator = createStubbedFileEnumerator({}, {
+                        "eslint/fixtures/config-hierarchy": DIRECTORY_CONFIG_HIERARCHY
+                    });
                     const targetPath = getFakeFixturePath("overrides", "two", "child-two.js");
                     const expected = {
                         rules: {
@@ -1519,7 +1452,7 @@ describe("FileEnumerator", () => {
                     assert.notStrictEqual(warning, null);
                     assert.strictEqual(
                         warning.message,
-                        `The 'parserOptions.ecmaFeatures.experimentalObjectRestSpread' option is deprecated. Use 'parserOptions.ecmaVersion' instead. (found in "tests${path.sep}fixtures${path.sep}config-file${path.sep}experimental-object-rest-spread${path.sep}extends${path.sep}common.yml")`
+                        `The 'parserOptions.ecmaFeatures.experimentalObjectRestSpread' option is deprecated. Use 'parserOptions.ecmaVersion' instead. (found in ".eslintrc.yml » .${path.sep}common.yml")`
                     );
                 });
 

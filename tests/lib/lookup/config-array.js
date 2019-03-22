@@ -43,7 +43,7 @@ describe("ConfigArray", () => {
         }
     });
 
-    describe("'isRoot()' method should the value of the last element which has 'root' property.", () => {
+    describe("'root' property should be the value of the last element which has 'root' property.", () => {
         const patterns = [
             { elements: [], expected: false },
             { elements: [{}], expected: false },
@@ -57,12 +57,12 @@ describe("ConfigArray", () => {
 
         for (const { elements, expected } of patterns) {
             it(`should be ${expected} if the elements are ${JSON.stringify(elements)}.`, () => {
-                assert.strictEqual(new ConfigArray(...elements).isRoot(), expected);
+                assert.strictEqual(new ConfigArray(...elements).root, expected);
             });
         }
     });
 
-    describe("'getPluginEnvironment(id)' method retrieves the environments of all plugins.", () => {
+    describe("'pluginEnvironments' property should be the environments of all plugins.", () => {
         const env = {
             "aaa/xxx": {},
             "bbb/xxx": {}
@@ -98,19 +98,25 @@ describe("ConfigArray", () => {
         });
 
         it("should return null for built-in env", () => {
-            assert.strictEqual(configArray.getPluginEnvironment("node"), null);
+            assert.strictEqual(configArray.pluginEnvironments.get("node"), void 0);
         });
 
         it("should return 'aaa/xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginEnvironment("aaa/xxx"), env["aaa/xxx"]);
+            assert.strictEqual(configArray.pluginEnvironments.get("aaa/xxx"), env["aaa/xxx"]);
         });
 
         it("should return 'bbb/xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginEnvironment("bbb/xxx"), env["bbb/xxx"]);
+            assert.strictEqual(configArray.pluginEnvironments.get("bbb/xxx"), env["bbb/xxx"]);
+        });
+
+        it("should throw an error if it tried to mutate.", () => {
+            assert.throws(() => {
+                configArray.pluginEnvironments.set("ccc/xxx", {});
+            });
         });
     });
 
-    describe("'getPluginProcessor(id)' method retrieves the processors of all plugins.", () => {
+    describe("'pluginProcessors' property should be the processors of all plugins.", () => {
         const processors = {
             "aaa/.xxx": {},
             "bbb/.xxx": {}
@@ -146,15 +152,21 @@ describe("ConfigArray", () => {
         });
 
         it("should return 'aaa/.xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginProcessor("aaa/.xxx"), processors["aaa/.xxx"]);
+            assert.strictEqual(configArray.pluginProcessors.get("aaa/.xxx"), processors["aaa/.xxx"]);
         });
 
         it("should return both 'bbb/.xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginProcessor("bbb/.xxx"), processors["bbb/.xxx"]);
+            assert.strictEqual(configArray.pluginProcessors.get("bbb/.xxx"), processors["bbb/.xxx"]);
+        });
+
+        it("should throw an error if it tried to mutate.", () => {
+            assert.throws(() => {
+                configArray.pluginProcessors.set("ccc/.xxx", {});
+            });
         });
     });
 
-    describe("'getPluginRule(id)' method retrieves the rules of all plugins.", () => {
+    describe("'pluginRules' property should be the rules of all plugins.", () => {
         const rules = {
             "aaa/xxx": {},
             "bbb/xxx": {}
@@ -190,19 +202,25 @@ describe("ConfigArray", () => {
         });
 
         it("should return null for built-in rules", () => {
-            assert.strictEqual(configArray.getPluginRule("eqeqeq"), null);
+            assert.strictEqual(configArray.pluginRules.get("eqeqeq"), void 0);
         });
 
         it("should return 'aaa/xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginRule("aaa/xxx"), rules["aaa/xxx"]);
+            assert.strictEqual(configArray.pluginRules.get("aaa/xxx"), rules["aaa/xxx"]);
         });
 
         it("should return 'bbb/xxx' if it exists.", () => {
-            assert.strictEqual(configArray.getPluginRule("bbb/xxx"), rules["bbb/xxx"]);
+            assert.strictEqual(configArray.pluginRules.get("bbb/xxx"), rules["bbb/xxx"]);
+        });
+
+        it("should throw an error if it tried to mutate.", () => {
+            assert.throws(() => {
+                configArray.pluginRules.set("ccc/xxx", {});
+            });
         });
     });
 
-    describe("'extractConfig(filePath)' method retrieves the merged config for a given file.", () => {
+    describe("'extractConfig(filePath)' method should retrieve the merged config for a given file.", () => {
         it("should throw an error if a 'parser' has the loading error.", () => {
             assert.throws(() => {
                 new ConfigArray(
@@ -624,7 +642,7 @@ describe("ConfigArray", () => {
         });
     });
 
-    describe("'getUsedExtractedConfigs(instance)' function retrieves used extracted configs from the instance's internal cache.", () => {
+    describe("'getUsedExtractedConfigs(instance)' function should retrieve used extracted configs from the instance's internal cache.", () => {
         let configArray;
 
         beforeEach(() => {

@@ -4,147 +4,1149 @@
  */
 "use strict";
 
-const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { assert } = require("chai");
-const importFresh = require("import-fresh");
-const leche = require("leche");
-const shell = require("shelljs");
-const { ConfigArrayFactory } = require("../../../lib/lookup/config-array-factory");
-const { ModuleResolver } = require("../../../lib/lookup/module-resolver");
+const { spy } = require("sinon");
+const { ConfigArray } = require("../../../lib/lookup/config-array");
+const { OverrideTester } = require("../../../lib/lookup/override-tester");
+const { defineConfigArrayFactoryWithInmemoryFileSystem } = require("./_utils");
 
-const proxyquire = require("proxyquire").noCallThru().noPreserveCache();
-const temp = require("temp").track();
+const tempDir = path.join(os.tmpdir(), "eslint/config-array-factory");
 
 /**
- * Creates a module resolver that always resolves the given mappings.
- * @param {Object<string, string|Object>} mapping A mapping of modules. The mapped value is a string, it resolves the module name to the path. Otherwise, it resolves the module name as is, and stubs the module.
- * @returns {ConfigArrayFactory} The stubbed ConfigArrayFactory class.
- * @private
+ * Assert a config array element.
+ * @param {Object} actual The actual value.
+ * @param {Object} providedExpected The expected value.
+ * @returns {void}
  */
-function createStubbedConfigArrayFactory(mapping) {
-    const stubs = {
-        "./module-resolver": {
-            ModuleResolver: {
-                resolve(request, relativeTo) {
-                    if (mapping.hasOwnProperty(request)) { // eslint-disable-line no-prototype-builtins
-                        if (typeof mapping[request] === "string") {
-                            return mapping[request];
-                        }
-                        if (mapping[request] instanceof Error) {
-                            throw mapping[request];
-                        }
-                        return request;
-                    }
-                    return ModuleResolver.resolve(request, relativeTo);
-                }
-            }
-        },
-        "import-fresh"(request) {
-            return stubs[request] || importFresh(request);
-        }
+function assertConfigArrayElement(actual, providedExpected) {
+    const expected = {
+        name: "",
+        filePath: "",
+        criteria: null,
+        env: void 0,
+        globals: void 0,
+        parser: void 0,
+        parserOptions: void 0,
+        plugins: void 0,
+        processor: void 0,
+        root: void 0,
+        rules: void 0,
+        settings: void 0,
+        ...providedExpected
     };
 
-    for (const [id, value] of Object.entries(mapping)) {
-        if (typeof value === "object") {
-            stubs[id] = value;
-        }
-    }
+    assert.deepStrictEqual(actual, expected);
+}
 
-    const { ConfigArrayFactory: StubbedConfigArrayFactory } = proxyquire(
-        "../../../lib/lookup/config-array-factory",
-        stubs
-    );
+/**
+ * Assert a config array element.
+ * @param {Object} actual The actual value.
+ * @param {Object} providedExpected The expected value.
+ * @returns {void}
+ */
+function assertConfig(actual, providedExpected) {
+    const expected = {
+        env: {},
+        globals: {},
+        parser: null,
+        parserOptions: {},
+        plugins: [],
+        rules: {},
+        settings: {},
+        ...providedExpected
+    };
 
-    return new StubbedConfigArrayFactory();
+    assert.deepStrictEqual(actual, expected);
 }
 
 describe("ConfigArrayFactory", () => {
+    describe("'create(configData, options)' method should normalize the config data.", () => {
+        const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+            cwd: () => tempDir
+        });
+        const factory = new ConfigArrayFactory();
+
+        it("should return an empty config array if 'configData' is null.", () => {
+            assert.strictEqual(factory.create(null).length, 0);
+        });
+
+        it("should throw an error if the config data had invalid properties,", () => {
+            assert.throws(() => {
+                factory.create({ files: true });
+            }, /Unexpected top-level property "files"/u);
+        });
+
+        it("should call '_normalizeConfigData(configData, options)' with given arguments except 'options.parent'.", () => {
+            const configData = {};
+            const filePath = __filename;
+            const name = "example";
+            const parent = new ConfigArray();
+            const normalizeConfigData = spy(factory, "_normalizeConfigData");
+
+            factory.create(configData, { filePath, name, parent });
+
+            assert.strictEqual(normalizeConfigData.callCount, 1);
+            assert.strictEqual(normalizeConfigData.args[0][0], configData);
+            assert.strictEqual(normalizeConfigData.args[0][1].filePath, filePath);
+            assert.strictEqual(normalizeConfigData.args[0][1].name, name);
+            assert.strictEqual(normalizeConfigData.args[0][1].parent, void 0);
+        });
+
+        it("should return a config array that contains the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.create({});
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+
+        it("should concatenate the elements of `options.parent` and the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.create({}, { parent });
+
+            assert.strictEqual(configArray.length, 4);
+            assert.strictEqual(configArray[0], parent[0]);
+            assert.strictEqual(configArray[1], parent[1]);
+            assert.strictEqual(configArray[2], elements[0]);
+            assert.strictEqual(configArray[3], elements[1]);
+        });
+
+        it("should not concatenate the elements of `options.parent` if the yielded elements from '_normalizeConfigData(configData, options)' has 'root:true'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{ root: true }, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.create({}, { parent });
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+    });
+
+    describe("'loadFile(filePath, options)' method should load a config file.", () => {
+        const basicFiles = {
+            "js/.eslintrc.js": "exports.settings = { name: 'js/.eslintrc.js' }",
+            "json/.eslintrc.json": "{ \"settings\": { \"name\": \"json/.eslintrc.json\" } }",
+            "legacy-json/.eslintrc": "{ \"settings\": { \"name\": \"legacy-json/.eslintrc\" } }",
+            "legacy-yml/.eslintrc": "settings:\n  name: legacy-yml/.eslintrc",
+            "yml/.eslintrc.yml": "settings:\n  name: yml/.eslintrc.yml",
+            "yaml/.eslintrc.yaml": "settings:\n  name: yaml/.eslintrc.yaml"
+        };
+        const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+            cwd: () => tempDir,
+            files: {
+                ...basicFiles,
+                "invalid-property.json": "{ \"files\": \"*.js\" }"
+            }
+        });
+        const factory = new ConfigArrayFactory();
+
+        it("should throw an error if 'filePath' is null.", () => {
+            assert.throws(() => factory.loadFile(null));
+        });
+
+        it("should throw an error if 'filePath' doesn't exist.", () => {
+            assert.throws(() => {
+                factory.loadFile("non-exist");
+            }, /Cannot read config file:.*non-exist/su);
+        });
+
+        it("should throw an error if the config data had invalid properties,", () => {
+            assert.throws(() => {
+                factory.loadFile("invalid-property.json");
+            }, /Unexpected top-level property "files"/u);
+        });
+
+        for (const filePath of Object.keys(basicFiles)) {
+            it(`should load '${filePath}' then return a config array what contains that file content.`, () => { // eslint-disable-line no-loop-func
+                const configArray = factory.loadFile(filePath);
+
+                assert.strictEqual(configArray.length, 1);
+                assertConfigArrayElement(configArray[0], {
+                    filePath: path.resolve(tempDir, filePath),
+                    name: path.relative(tempDir, path.resolve(tempDir, filePath)),
+                    settings: { name: filePath }
+                });
+            });
+        }
+
+        it("should call '_normalizeConfigData(configData, options)' with the loaded config data and given options except 'options.parent'.", () => {
+            const filePath = "js/.eslintrc.js";
+            const name = "example";
+            const parent = new ConfigArray();
+            const normalizeConfigData = spy(factory, "_normalizeConfigData");
+
+            factory.loadFile(filePath, { name, parent });
+
+            assert.strictEqual(normalizeConfigData.callCount, 1);
+            assert.deepStrictEqual(normalizeConfigData.args[0][0], { settings: { name: filePath } });
+            assert.strictEqual(normalizeConfigData.args[0][1].filePath, path.resolve(tempDir, filePath));
+            assert.strictEqual(normalizeConfigData.args[0][1].name, name);
+            assert.strictEqual(normalizeConfigData.args[0][1].parent, void 0);
+        });
+
+        it("should return a config array that contains the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadFile("js/.eslintrc.js");
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+
+        it("should concatenate the elements of `options.parent` and the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadFile("js/.eslintrc.js", { parent });
+
+            assert.strictEqual(configArray.length, 4);
+            assert.strictEqual(configArray[0], parent[0]);
+            assert.strictEqual(configArray[1], parent[1]);
+            assert.strictEqual(configArray[2], elements[0]);
+            assert.strictEqual(configArray[3], elements[1]);
+        });
+
+        it("should not concatenate the elements of `options.parent` if the yielded elements from '_normalizeConfigData(configData, options)' has 'root:true'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{ root: true }, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadFile("js/.eslintrc.js", { parent });
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+    });
+
+    describe("'loadOnDirectory(directoryPath, options)' method should load the config file of a directory.", () => {
+        const basicFiles = {
+            "js/.eslintrc.js": "exports.settings = { name: 'js/.eslintrc.js' }",
+            "json/.eslintrc.json": "{ \"settings\": { \"name\": \"json/.eslintrc.json\" } }",
+            "legacy-json/.eslintrc": "{ \"settings\": { \"name\": \"legacy-json/.eslintrc\" } }",
+            "legacy-yml/.eslintrc": "settings:\n  name: legacy-yml/.eslintrc",
+            "yml/.eslintrc.yml": "settings:\n  name: yml/.eslintrc.yml",
+            "yaml/.eslintrc.yaml": "settings:\n  name: yaml/.eslintrc.yaml"
+        };
+        const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+            cwd: () => tempDir,
+            files: {
+                ...basicFiles,
+                "invalid-property/.eslintrc.json": "{ \"files\": \"*.js\" }"
+            }
+        });
+        const factory = new ConfigArrayFactory();
+
+        it("should throw an error if 'directoryPath' is null.", () => {
+            assert.throws(() => factory.loadOnDirectory(null));
+        });
+
+        it("should return an empty config array if the config file of 'directoryPath' doesn't exist.", () => {
+            assert.strictEqual(factory.loadOnDirectory("non-exist").length, 0);
+        });
+
+        it("should throw an error if the config data had invalid properties,", () => {
+            assert.throws(() => {
+                factory.loadOnDirectory("invalid-property");
+            }, /Unexpected top-level property "files"/u);
+        });
+
+        for (const filePath of Object.keys(basicFiles)) {
+            const directoryPath = filePath.split("/")[0];
+
+            it(`should load '${directoryPath}' then return a config array what contains the config file of that directory.`, () => { // eslint-disable-line no-loop-func
+                const configArray = factory.loadOnDirectory(directoryPath);
+
+                assert.strictEqual(configArray.length, 1);
+                assertConfigArrayElement(configArray[0], {
+                    filePath: path.resolve(tempDir, filePath),
+                    name: path.relative(tempDir, path.resolve(tempDir, filePath)),
+                    settings: { name: filePath }
+                });
+            });
+        }
+
+        it("should call '_normalizeConfigData(configData, options)' with the loaded config data and given options except 'options.parent'.", () => {
+            const directoryPath = "js";
+            const name = "example";
+            const parent = new ConfigArray();
+            const normalizeConfigData = spy(factory, "_normalizeConfigData");
+
+            factory.loadOnDirectory(directoryPath, { name, parent });
+
+            assert.strictEqual(normalizeConfigData.callCount, 1);
+            assert.deepStrictEqual(normalizeConfigData.args[0][0], { settings: { name: `${directoryPath}/.eslintrc.js` } });
+            assert.strictEqual(normalizeConfigData.args[0][1].filePath, path.resolve(tempDir, directoryPath, ".eslintrc.js"));
+            assert.strictEqual(normalizeConfigData.args[0][1].name, name);
+            assert.strictEqual(normalizeConfigData.args[0][1].parent, void 0);
+        });
+
+        it("should return a config array that contains the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadOnDirectory("js");
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+
+        it("should concatenate the elements of `options.parent` and the yielded elements from '_normalizeConfigData(configData, options)'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{}, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadOnDirectory("js", { parent });
+
+            assert.strictEqual(configArray.length, 4);
+            assert.strictEqual(configArray[0], parent[0]);
+            assert.strictEqual(configArray[1], parent[1]);
+            assert.strictEqual(configArray[2], elements[0]);
+            assert.strictEqual(configArray[3], elements[1]);
+        });
+
+        it("should not concatenate the elements of `options.parent` if the yielded elements from '_normalizeConfigData(configData, options)' has 'root:true'.", () => {
+            const parent = new ConfigArray({}, {});
+            const elements = [{ root: true }, {}];
+
+            factory._normalizeConfigData = () => elements; // eslint-disable-line no-underscore-dangle
+
+            const configArray = factory.loadOnDirectory("js", { parent });
+
+            assert.strictEqual(configArray.length, 2);
+            assert.strictEqual(configArray[0], elements[0]);
+            assert.strictEqual(configArray[1], elements[1]);
+        });
+    });
+
+    /*
+     * All of `create`, `loadFile`, and `loadOnDirectory` call this method.
+     * So this section tests the common part of the three.
+     */
+    describe("'_normalizeConfigData(configData, options)' method should normalize the config data.", () => {
+        let factory = null;
+
+        /**
+         * Call `_normalizeConfigData` method with given arguments.
+         * @param  {...any} args The arguments to pass.
+         * @returns {ConfigArray} The created config array.
+         */
+        function create(...args) {
+            return new ConfigArray(...factory._normalizeConfigData(...args)); // eslint-disable-line no-underscore-dangle
+        }
+
+        describe("misc", () => {
+            before(() => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    cwd: () => tempDir
+                });
+
+                factory = new ConfigArrayFactory();
+            });
+
+            describe("if the config data was empty, the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({});
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the default values in the element.", () => {
+                    assertConfigArrayElement(configArray[0], {});
+                });
+            });
+
+            describe("if the config data had 'env' property, the returned value", () => {
+                const env = { node: true };
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ env });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'env' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { env });
+                });
+            });
+
+            describe("if the config data had 'globals' property, the returned value", () => {
+                const globals = { window: "readonly" };
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ globals });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'globals' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { globals });
+                });
+            });
+
+            describe("if the config data had 'parser' property, the returned value", () => {
+                const parser = "espree";
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ parser });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'parser' value in the element.", () => {
+                    assert.strictEqual(configArray[0].parser.id, parser);
+                });
+            });
+
+            describe("if the config data had 'parserOptions' property, the returned value", () => {
+                const parserOptions = { ecmaVersion: 2015 };
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ parserOptions });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'parserOptions' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { parserOptions });
+                });
+            });
+
+            describe("if the config data had 'plugins' property, the returned value", () => {
+                const plugins = [];
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ plugins });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'plugins' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { plugins: {} });
+                });
+            });
+
+            describe("if the config data had 'root' property, the returned value", () => {
+                const root = true;
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ root });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'root' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { root });
+                });
+            });
+
+            describe("if the config data had 'rules' property, the returned value", () => {
+                const rules = { eqeqeq: "error" };
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ rules });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'rules' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { rules });
+                });
+            });
+
+            describe("if the config data had 'settings' property, the returned value", () => {
+                const settings = { foo: 777 };
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ settings });
+                });
+
+                it("should have an element.", () => {
+                    assert.strictEqual(configArray.length, 1);
+                });
+
+                it("should have the 'settings' value in the element.", () => {
+                    assertConfigArrayElement(configArray[0], { settings });
+                });
+            });
+        });
+
+        describe("'parser' details", () => {
+            before(() => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    cwd: () => tempDir,
+                    files: {
+                        "node_modules/xxx-parser/index.js": "exports.name = 'xxx-parser';",
+                        "subdir/node_modules/xxx-parser/index.js": "exports.name = 'subdir/xxx-parser';",
+                        "parser.js": "exports.name = './parser.js';"
+                    }
+                });
+
+                factory = new ConfigArrayFactory();
+            });
+
+            describe("if the 'parser' property was a valid package, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ parser: "xxx-parser" })[0];
+                });
+
+                it("should have the package ID at 'parser.id' property.", () => {
+                    assert.strictEqual(element.parser.id, "xxx-parser");
+                });
+
+                it("should have the package object at 'parser.definition' property.", () => {
+                    assert.deepStrictEqual(element.parser.definition, { name: "xxx-parser" });
+                });
+
+                it("should have the path to the package at 'parser.filePath' property.", () => {
+                    assert.strictEqual(element.parser.filePath, path.join(tempDir, "node_modules/xxx-parser/index.js"));
+                });
+            });
+
+            describe("if the 'parser' property was an invalid package, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ parser: "invalid-parser" })[0];
+                });
+
+                it("should have the package ID at 'parser.id' property.", () => {
+                    assert.strictEqual(element.parser.id, "invalid-parser");
+                });
+
+                it("should have the loading error at 'parser.error' property.", () => {
+                    assert.match(element.parser.error.message, /Cannot find module 'invalid-parser'/u);
+                });
+            });
+
+            describe("if the 'parser' property was a valid relative path, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ parser: "./parser" })[0];
+                });
+
+                it("should have the given path at 'parser.id' property.", () => {
+                    assert.strictEqual(element.parser.id, "./parser");
+                });
+
+                it("should have the file's object at 'parser.definition' property.", () => {
+                    assert.deepStrictEqual(element.parser.definition, { name: "./parser.js" });
+                });
+
+                it("should have the absolute path to the file at 'parser.filePath' property.", () => {
+                    assert.strictEqual(element.parser.filePath, path.join(tempDir, "./parser.js"));
+                });
+            });
+
+            describe("if the 'parser' property was an invalid relative path, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ parser: "./invalid-parser" })[0];
+                });
+
+                it("should have the given path at 'parser.id' property.", () => {
+                    assert.strictEqual(element.parser.id, "./invalid-parser");
+                });
+
+                it("should have the loading error at 'parser.error' property.", () => {
+                    assert.match(element.parser.error.message, /Cannot find module '.\/invalid-parser'/u);
+                });
+            });
+
+            describe("if 'parser' property was given and 'filePath' option was given, the parser", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create(
+                        { parser: "xxx-parser" },
+                        { filePath: path.join(tempDir, "subdir/.eslintrc") }
+                    )[0];
+                });
+
+                it("should be resolved relative to the 'filePath' option.", () => {
+                    assert.strictEqual(
+                        element.parser.filePath,
+
+                        // rather than "xxx-parser" at the project root.
+                        path.join(tempDir, "subdir/node_modules/xxx-parser/index.js")
+                    );
+                });
+            });
+        });
+
+        describe("'plugins' details", () => {
+            before(() => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    cwd: () => tempDir,
+                    files: {
+                        "node_modules/eslint-plugin-ext/index.js": "exports.processors = { '.abc': {}, '.xyz': {} };",
+                        "node_modules/eslint-plugin-subdir/index.js": "",
+                        "node_modules/eslint-plugin-xxx/index.js": "exports.name = 'eslint-plugin-xxx';",
+                        "subdir/node_modules/eslint-plugin-subdir/index.js": "",
+                        "parser.js": ""
+                    }
+                });
+
+                factory = new ConfigArrayFactory();
+            });
+
+            describe("if the 'plugins' property was a valid package, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ plugins: ["xxx"] })[0];
+                });
+
+                it("should have 'plugins[id]' property.", () => {
+                    assert.notStrictEqual(element.plugins.xxx, void 0);
+                });
+
+                it("should have the package ID at 'plugins[id].id' property.", () => {
+                    assert.strictEqual(element.plugins.xxx.id, "xxx");
+                });
+
+                it("should have the package object at 'plugins[id].definition' property.", () => {
+                    assert.deepStrictEqual(element.plugins.xxx.definition, { name: "eslint-plugin-xxx" });
+                });
+
+                it("should have the path to the package at 'plugins[id].filePath' property.", () => {
+                    assert.strictEqual(element.plugins.xxx.filePath, path.join(tempDir, "node_modules/eslint-plugin-xxx/index.js"));
+                });
+            });
+
+            describe("if the 'plugins' property was an invalid package, the first config array element", () => {
+                let element;
+
+                beforeEach(() => {
+                    element = create({ plugins: ["invalid"] })[0];
+                });
+
+                it("should have 'plugins[id]' property.", () => {
+                    assert.notStrictEqual(element.plugins.invalid, void 0);
+                });
+
+                it("should have the package ID at 'plugins[id].id' property.", () => {
+                    assert.strictEqual(element.plugins.invalid.id, "invalid");
+                });
+
+                it("should have the loading error at 'plugins[id].error' property.", () => {
+                    assert.match(element.plugins.invalid.error.message, /Cannot find module 'eslint-plugin-invalid'/u);
+                });
+            });
+
+            describe("even if 'plugins' property was given and 'filePath' option was given,", () => {
+                it("should load the plugin from the project root.", () => {
+                    const configArray = create(
+                        { plugins: ["subdir"] },
+                        { filePath: path.resolve(tempDir, "subdir/a.js") }
+                    );
+
+                    assert.strictEqual(
+                        configArray[0].plugins.subdir.filePath,
+
+                        // "subdir/node_modules/eslint-plugin-subdir/index.js" exists, but not it.
+                        path.resolve(tempDir, "node_modules/eslint-plugin-subdir/index.js")
+                    );
+                });
+            });
+
+            describe("if 'plugins' property was given and the plugin has two file extension processors, the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({ plugins: ["ext"] });
+                });
+
+                it("should have three elements.", () => {
+                    assert.strictEqual(configArray.length, 3);
+                });
+
+                describe("the first element", () => {
+                    let element;
+
+                    beforeEach(() => {
+                        element = configArray[0];
+                    });
+
+                    it("should be named '#processors[\"ext/.abc\"]'.", () => {
+                        assert.strictEqual(element.name, "#processors[\"ext/.abc\"]");
+                    });
+
+                    it("should not have 'plugins' property.", () => {
+                        assert.strictEqual(element.plugins, void 0);
+                    });
+
+                    it("should have 'processor' property.", () => {
+                        assert.strictEqual(element.processor, "ext/.abc");
+                    });
+
+                    it("should have 'criteria' property what matches '.abc'.", () => {
+                        assert.strictEqual(element.criteria.test(path.join(tempDir, "1234.abc")), true);
+                        assert.strictEqual(element.criteria.test(path.join(tempDir, "1234.xyz")), false);
+                    });
+                });
+
+                describe("the secand element", () => {
+                    let element;
+
+                    beforeEach(() => {
+                        element = configArray[1];
+                    });
+
+                    it("should be named '#processors[\"ext/.xyz\"]'.", () => {
+                        assert.strictEqual(element.name, "#processors[\"ext/.xyz\"]");
+                    });
+
+                    it("should not have 'plugins' property.", () => {
+                        assert.strictEqual(element.plugins, void 0);
+                    });
+
+                    it("should have 'processor' property.", () => {
+                        assert.strictEqual(element.processor, "ext/.xyz");
+                    });
+
+                    it("should have 'criteria' property what matches '.xyz'.", () => {
+                        assert.strictEqual(element.criteria.test(path.join(tempDir, "1234.abc")), false);
+                        assert.strictEqual(element.criteria.test(path.join(tempDir, "1234.xyz")), true);
+                    });
+                });
+
+                describe("the third element", () => {
+                    let element;
+
+                    beforeEach(() => {
+                        element = configArray[2];
+                    });
+
+                    it("should have 'plugins' property.", () => {
+                        assert.strictEqual(element.plugins.ext.id, "ext");
+                    });
+
+                    it("should not have 'processor' property.", () => {
+                        assert.strictEqual(element.processor, void 0);
+                    });
+                });
+            });
+        });
+
+        describe("'extends' details", () => {
+            before(() => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    cwd: () => tempDir,
+                    files: {
+                        "node_modules/eslint-config-foo/index.js": "exports.env = { browser: true }",
+                        "node_modules/eslint-config-one/index.js": "module.exports = { extends: 'two', env: { browser: true } }",
+                        "node_modules/eslint-config-two/index.js": "module.exports = { env: { node: true } }",
+                        "node_modules/eslint-config-override/index.js": `
+                            module.exports = {
+                                rules: { regular: 1 },
+                                overrides: [
+                                    { files: '*.xxx', rules: { override: 1 } },
+                                    { files: '*.yyy', rules: { override: 2 } }
+                                ]
+                            }
+                        `,
+                        "node_modules/eslint-plugin-foo/index.js": "exports.configs = { bar: { env: { es6: true } } }",
+                        "node_modules/eslint-plugin-invalid-config/index.js": "exports.configs = { foo: {} }",
+                        "base.js": "module.exports = { rules: { semi: [2, 'always'] } };"
+                    }
+                });
+
+                factory = new ConfigArrayFactory();
+            });
+
+            it("should throw an error when extends config module is not found", () => {
+                assert.throws(() => {
+                    create({
+                        extends: "not-exist",
+                        rules: { eqeqeq: 2 }
+                    });
+                }, /Cannot find module 'eslint-config-not-exist'/u);
+            });
+
+            it("should throw an error when an eslint config is not found", () => {
+                assert.throws(() => {
+                    create({
+                        extends: "eslint:foo",
+                        rules: { eqeqeq: 2 }
+                    });
+                }, /Failed to load config "eslint:foo" to extend from./u);
+            });
+
+            it("should throw an error when a plugin config is not found", () => {
+                assert.throws(() => {
+                    create({
+                        extends: "plugin:invalid-config/bar",
+                        rules: { eqeqeq: 2 }
+                    });
+                }, /Failed to load config "plugin:invalid-config\/bar" to extend from./u);
+            });
+
+            describe("if 'extends' property was 'eslint:all', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "eslint:all", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have two elements.", () => {
+                    assert.strictEqual(configArray.length, 2);
+                });
+
+                it("should have the config data of 'eslint:all' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » eslint:all",
+                        filePath: require.resolve("../../../conf/eslint-all.js"),
+                        ...require("../../../conf/eslint-all.js")
+                    });
+                });
+
+                it("should have the given config data at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was 'eslint:recommended', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "eslint:recommended", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have two elements.", () => {
+                    assert.strictEqual(configArray.length, 2);
+                });
+
+                it("should have the config data of 'eslint:recommended' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » eslint:recommended",
+                        filePath: require.resolve("../../../conf/eslint-recommended.js"),
+                        ...require("../../../conf/eslint-recommended.js")
+                    });
+                });
+
+                it("should have the given config data at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was 'foo', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "foo", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have two elements.", () => {
+                    assert.strictEqual(configArray.length, 2);
+                });
+
+                it("should have the config data of 'eslint-config-foo' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » foo",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-foo/index.js"),
+                        env: { browser: true }
+                    });
+                });
+
+                it("should have the given config data at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was 'plugin:foo/bar', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "plugin:foo/bar", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have two elements.", () => {
+                    assert.strictEqual(configArray.length, 2);
+                });
+
+                it("should have the config data of 'plugin:foo/bar' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » plugin:foo/bar",
+                        filePath: path.join(tempDir, "node_modules/eslint-plugin-foo/index.js"),
+                        env: { es6: true }
+                    });
+                });
+
+                it("should have the given config data at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was './base', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "./base", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have two elements.", () => {
+                    assert.strictEqual(configArray.length, 2);
+                });
+
+                it("should have the config data of './base' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » ./base",
+                        filePath: path.join(tempDir, "base.js"),
+                        rules: { semi: [2, "always"] }
+                    });
+                });
+
+                it("should have the given config data at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was 'one' and the 'one' extends 'two', the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "one", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have three elements.", () => {
+                    assert.strictEqual(configArray.length, 3);
+                });
+
+                it("should have the config data of 'eslint-config-two' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » one » two",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-two/index.js"),
+                        env: { node: true }
+                    });
+                });
+
+                it("should have the config data of 'eslint-config-one' at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc » one",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-one/index.js"),
+                        env: { browser: true }
+                    });
+                });
+
+                it("should have the given config data at the thrid element.", () => {
+                    assertConfigArrayElement(configArray[2], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+
+            describe("if 'extends' property was 'override' and the 'override' has 'overrides' property, the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create(
+                        { extends: "override", rules: { eqeqeq: 1 } },
+                        { name: ".eslintrc" }
+                    );
+                });
+
+                it("should have four elements.", () => {
+                    assert.strictEqual(configArray.length, 4);
+                });
+
+                it("should have the config data of 'eslint-config-override' at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        name: ".eslintrc » override",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-override/index.js"),
+                        rules: { regular: 1 }
+                    });
+                });
+
+                it("should have the 'overrides[0]' config data of 'eslint-config-override' at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: ".eslintrc » override#overrides[0]",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-override/index.js"),
+                        criteria: OverrideTester.create(["*.xxx"], [], tempDir),
+                        rules: { override: 1 }
+                    });
+                });
+
+                it("should have the 'overrides[1]' config data of 'eslint-config-override' at the third element.", () => {
+                    assertConfigArrayElement(configArray[2], {
+                        name: ".eslintrc » override#overrides[1]",
+                        filePath: path.join(tempDir, "node_modules/eslint-config-override/index.js"),
+                        criteria: OverrideTester.create(["*.yyy"], [], tempDir),
+                        rules: { override: 2 }
+                    });
+                });
+
+                it("should have the given config data at the fourth element.", () => {
+                    assertConfigArrayElement(configArray[3], {
+                        name: ".eslintrc",
+                        rules: { eqeqeq: 1 }
+                    });
+                });
+            });
+        });
+
+        describe("'overrides' details", () => {
+            before(() => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    cwd: () => tempDir,
+                    files: {
+                    }
+                });
+
+                factory = new ConfigArrayFactory();
+            });
+
+            describe("if 'overrides' property was given, the returned value", () => {
+                let configArray;
+
+                beforeEach(() => {
+                    configArray = create({
+                        rules: { regular: 1 },
+                        overrides: [
+                            { files: "*.xxx", rules: { override: 1 } },
+                            { files: "*.yyy", rules: { override: 2 } }
+                        ]
+                    });
+                });
+
+                it("should have three elements.", () => {
+                    assert.strictEqual(configArray.length, 3);
+                });
+
+                it("should have the given config data at the first element.", () => {
+                    assertConfigArrayElement(configArray[0], {
+                        rules: { regular: 1 }
+                    });
+                });
+
+                it("should have the config data of 'overrides[0]' at the second element.", () => {
+                    assertConfigArrayElement(configArray[1], {
+                        name: "#overrides[0]",
+                        criteria: OverrideTester.create(["*.xxx"], [], tempDir),
+                        rules: { override: 1 }
+                    });
+                });
+
+                it("should have the config data of 'overrides[1]' at the third element.", () => {
+                    assertConfigArrayElement(configArray[2], {
+                        name: "#overrides[1]",
+                        criteria: OverrideTester.create(["*.yyy"], [], tempDir),
+                        rules: { override: 2 }
+                    });
+                });
+            });
+        });
+    });
 
     describe("Moved from tests/lib/config/config-file.js", () => {
-
-        /*
-         * Project path is the project that is including ESLint as a dependency. In the
-         * case of these tests, it will end up the parent of the "eslint" folder. That's
-         * fine for the purposes of testing because the tests are just relative to an
-         * ancestor location.
-         */
-        const PROJECT_PATH = path.resolve(__dirname, "../../../../");
-
-        /**
-         * Helper function get easily get a path in the fixtures directory.
-         * @param {string} filepath The path to find in the fixtures directory.
-         * @returns {string} Full path in the fixtures directory.
-         * @private
-         */
-        function getFixturePath(filepath) {
-            return path.resolve(__dirname, "../../fixtures/config-file", filepath);
-        }
-
-        /**
-         * Helper function to write configs to temp file.
-         * @param {Object} config Config to write out to temp file.
-         * @param {string} filename Name of file to write in temp dir.
-         * @param {string} existingTmpDir Optional dir path if temp file exists.
-         * @returns {string} Full path to the temp file.
-         * @private
-         */
-        function writeTempConfigFile(config, filename, existingTmpDir) {
-            const tmpFileDir = existingTmpDir || temp.mkdirSync("eslint-tests-"),
-                tmpFilePath = path.join(tmpFileDir, filename),
-                tmpFileContents = JSON.stringify(config);
-
-            fs.writeFileSync(tmpFilePath, tmpFileContents);
-            return tmpFilePath;
-        }
-
-        /**
-         * Helper function to write JS configs to temp file.
-         * @param {Object} config Config to write out to temp file.
-         * @param {string} filename Name of file to write in temp dir.
-         * @param {string} existingTmpDir Optional dir path if temp file exists.
-         * @returns {string} Full path to the temp file.
-         * @private
-         */
-        function writeTempJsConfigFile(config, filename, existingTmpDir) {
-            const tmpFileDir = existingTmpDir || temp.mkdirSync("eslint-tests-"),
-                tmpFilePath = path.join(tmpFileDir, filename),
-                tmpFileContents = `module.exports = ${JSON.stringify(config)}`;
-
-            fs.writeFileSync(tmpFilePath, tmpFileContents);
-            return tmpFilePath;
-        }
-
-        /**
-         * Creates a module path relative to the current working directory.
-         * @param {string} moduleName The full module name.
-         * @returns {string} A full path for the module local to cwd.
-         * @private
-         */
-        function getProjectModulePath(moduleName) {
-            return path.resolve(PROJECT_PATH, "./node_modules", moduleName, "index.js");
-        }
-
-        /**
-         * Creates a module path relative to the given directory.
-         * @param {string} moduleName The full module name.
-         * @returns {string} A full path for the module local to the given directory.
-         * @private
-         */
-        function getRelativeModulePath(moduleName) {
-            return path.resolve("./node_modules", moduleName, "index.js");
-        }
-
         describe("applyExtends()", () => {
+            const files = {
+                "node_modules/eslint-config-foo/index.js": "exports.env = { browser: true }",
+                "node_modules/eslint-config-one/index.js": "module.exports = { extends: 'two', env: { browser: true } }",
+                "node_modules/eslint-config-two/index.js": "module.exports = { env: { node: true } }",
+                "node_modules/eslint-plugin-invalid-parser/index.js": "exports.configs = { foo: { parser: 'babel-eslint' } }",
+                "node_modules/eslint-plugin-invalid-config/index.js": "exports.configs = { foo: {} }",
+                "js/.eslintrc.js": "module.exports = { rules: { semi: [2, 'always'] } };",
+                "json/.eslintrc.json": "{ \"rules\": { \"quotes\": [2, \"double\"] } }",
+                "package-json/package.json": "{ \"eslintConfig\": { \"env\": { \"es6\": true } } }",
+                "yaml/.eslintrc.yaml": "env:\n    browser: true"
+            };
+            const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({ files });
+            const factory = new ConfigArrayFactory();
 
             /**
              * Apply `extends` property.
-             * @param {ConfigArrayFactory} factory The factory.
              * @param {Object} configData The config that has `extends` property.
-             * @param {string} filePath The path to the config data.
+             * @param {string} [filePath] The path to the config data.
              * @returns {Object} The applied config data.
              */
-            function applyExtends(factory, configData, filePath) {
+            function applyExtends(configData, filePath = "whatever") {
                 return factory
                     .create(configData, { filePath })
                     .extractConfig(filePath)
@@ -152,226 +1154,127 @@ describe("ConfigArrayFactory", () => {
             }
 
             it("should apply extension 'foo' when specified from root directory config", () => {
-                const resolvedPath = path.resolve(PROJECT_PATH, "./node_modules/eslint-config-foo/index.js");
-                const factory = createStubbedConfigArrayFactory({
-                    "eslint-config-foo": resolvedPath,
-                    [resolvedPath]: {
-                        env: { browser: true }
-                    }
-                });
-
-                const config = applyExtends(factory, {
+                const config = applyExtends({
                     extends: "foo",
                     rules: { eqeqeq: 2 }
-                }, "/whatever");
+                });
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     env: { browser: true },
-                    globals: {},
-                    rules: { eqeqeq: [2] },
-                    settings: {}
+                    rules: { eqeqeq: [2] }
                 });
             });
 
             it("should apply all rules when extends config includes 'eslint:all'", () => {
-                const factory = createStubbedConfigArrayFactory({});
-                const config = applyExtends(factory, {
+                const config = applyExtends({
                     extends: "eslint:all"
-                }, "/whatever");
+                });
 
                 assert.strictEqual(config.rules.eqeqeq[0], "error");
                 assert.strictEqual(config.rules.curly[0], "error");
             });
 
             it("should throw an error when extends config module is not found", () => {
-                const factory = createStubbedConfigArrayFactory({});
-
                 assert.throws(() => {
-                    applyExtends(factory, {
-                        extends: "foo",
+                    applyExtends({
+                        extends: "not-exist",
                         rules: { eqeqeq: 2 }
-                    }, "/whatever");
-                }, /Cannot find module 'eslint-config-foo'/u);
+                    });
+                }, /Cannot find module 'eslint-config-not-exist'/u);
             });
 
             it("should throw an error when an eslint config is not found", () => {
-                const factory = createStubbedConfigArrayFactory({});
-
                 assert.throws(() => {
-                    applyExtends(factory, {
+                    applyExtends({
                         extends: "eslint:foo",
                         rules: { eqeqeq: 2 }
-                    }, "/whatever");
+                    });
                 }, /Failed to load config "eslint:foo" to extend from./u);
             });
 
             it("should throw an error when a parser in a plugin config is not found", () => {
-                const resolvedPath = path.resolve(PROJECT_PATH, "./node_modules/eslint-plugin-test/index.js");
-                const factory = createStubbedConfigArrayFactory({
-                    "eslint-plugin-test": resolvedPath,
-                    [resolvedPath]: {
-                        configs: {
-                            bar: {
-                                parser: "babel-eslint"
-                            }
-                        }
-                    }
-                });
-
                 assert.throws(() => {
-                    applyExtends(factory, {
-                        extends: "plugin:test/bar",
+                    applyExtends({
+                        extends: "plugin:invalid-parser/foo",
                         rules: { eqeqeq: 2 }
-                    }, "/whatever");
+                    });
                 }, /Cannot find module 'babel-eslint'/u);
             });
 
             it("should throw an error when a plugin config is not found", () => {
-                const resolvedPath = path.resolve(PROJECT_PATH, "./node_modules/eslint-plugin-test/index.js");
-                const factory = createStubbedConfigArrayFactory({
-                    "eslint-plugin-test": resolvedPath,
-                    [resolvedPath]: {
-                        configs: {
-                            baz: {}
-                        }
-                    }
-                });
-
                 assert.throws(() => {
-                    applyExtends(factory, {
-                        extends: "plugin:test/bar",
+                    applyExtends({
+                        extends: "plugin:invalid-config/bar",
                         rules: { eqeqeq: 2 }
-                    }, "/whatever");
-                }, /Failed to load config "plugin:test\/bar" to extend from./u);
+                    });
+                }, /Failed to load config "plugin:invalid-config\/bar" to extend from./u);
             });
 
             it("should apply extensions recursively when specified from package", () => {
-                const resolvedPaths = [
-                    path.resolve(PROJECT_PATH, "./node_modules/eslint-config-foo/index.js"),
-                    path.resolve(PROJECT_PATH, "./node_modules/eslint-config-bar/index.js")
-                ];
-                const factory = createStubbedConfigArrayFactory({
-                    "eslint-config-foo": resolvedPaths[0],
-                    "eslint-config-bar": resolvedPaths[1],
-                    [resolvedPaths[0]]: {
-                        extends: "bar",
-                        env: { browser: true }
-                    },
-                    [resolvedPaths[1]]: {
-                        rules: {
-                            bar: 2
-                        }
-                    }
-                });
-                const config = applyExtends(factory, {
-                    extends: "foo",
+                const config = applyExtends({
+                    extends: "one",
                     rules: { eqeqeq: 2 }
-                }, "/whatever");
+                });
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: { browser: true },
-                    globals: {},
-                    rules: {
-                        eqeqeq: [2],
-                        bar: [2]
-                    },
-                    settings: {}
+                assertConfig(config, {
+                    env: { browser: true, node: true },
+                    rules: { eqeqeq: [2] }
                 });
             });
 
             it("should apply extensions when specified from a JavaScript file", () => {
-                const extendsFile = "./.eslintrc.js";
-                const filePath = getFixturePath("js/foo.js");
-                const factory = createStubbedConfigArrayFactory({});
-                const config = applyExtends(factory, {
-                    extends: extendsFile,
+                const config = applyExtends({
+                    extends: ".eslintrc.js",
                     rules: { eqeqeq: 2 }
-                }, filePath);
+                }, "js/foo.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
                     rules: {
                         semi: [2, "always"],
                         eqeqeq: [2]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should apply extensions when specified from a YAML file", () => {
-                const extendsFile = "./.eslintrc.yaml";
-                const filePath = getFixturePath("yaml/foo.js");
-                const factory = createStubbedConfigArrayFactory({});
-                const config = applyExtends(factory, {
-                    extends: extendsFile,
+                const config = applyExtends({
+                    extends: ".eslintrc.yaml",
                     rules: { eqeqeq: 2 }
-                }, filePath);
+                }, "yaml/foo.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     env: { browser: true },
-                    globals: {},
                     rules: {
                         eqeqeq: [2]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should apply extensions when specified from a JSON file", () => {
-                const extendsFile = "./.eslintrc.json";
-                const filePath = getFixturePath("json/foo.js");
-                const factory = createStubbedConfigArrayFactory({});
-                const config = applyExtends(factory, {
-                    extends: extendsFile,
+                const config = applyExtends({
+                    extends: ".eslintrc.json",
                     rules: { eqeqeq: 2 }
-                }, filePath);
+                }, "json/foo.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
                     rules: {
                         eqeqeq: [2],
                         quotes: [2, "double"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should apply extensions when specified from a package.json file in a sibling directory", () => {
-                const extendsFile = "../package-json/package.json";
-                const filePath = getFixturePath("json/foo.js");
-                const factory = createStubbedConfigArrayFactory({});
-                const config = applyExtends(factory, {
-                    extends: extendsFile,
+                const config = applyExtends({
+                    extends: "../package-json/package.json",
                     rules: { eqeqeq: 2 }
-                }, filePath);
+                }, "json/foo.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     env: { es6: true },
-                    globals: {},
                     rules: {
                         eqeqeq: [2]
-                    },
-                    settings: {}
+                    }
                 });
             });
         });
@@ -380,7 +1283,7 @@ describe("ConfigArrayFactory", () => {
 
             /**
              * Load a given config file.
-             * @param {ConfigArrayFactory} factory The factory.
+             * @param {ConfigArrayFactory} factory The factory to load.
              * @param {string} filePath The path to a config file.
              * @returns {Object} The applied config data.
              */
@@ -392,189 +1295,191 @@ describe("ConfigArrayFactory", () => {
             }
 
             it("should throw error if file doesnt exist", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem();
                 const factory = new ConfigArrayFactory();
 
                 assert.throws(() => {
-                    load(factory, getFixturePath("legacy/nofile.js"));
+                    load(factory, "legacy/nofile.js");
                 });
 
                 assert.throws(() => {
-                    load(factory, getFixturePath("legacy/package.json"));
+                    load(factory, "legacy/package.json");
                 });
             });
 
             it("should load information from a legacy file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "legacy/.eslintrc": "{ rules: { eqeqeq: 2 } }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("legacy/.eslintrc");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "legacy/.eslintrc");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
                     rules: {
                         eqeqeq: [2]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load information from a JavaScript file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "js/.eslintrc.js": "module.exports = { rules: { semi: [2, 'always'] } };"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("js/.eslintrc.js");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "js/.eslintrc.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
                     rules: {
                         semi: [2, "always"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should throw error when loading invalid JavaScript file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "js/.eslintrc.broken.js": "module.exports = { rules: { semi: [2, 'always'] }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
 
                 assert.throws(() => {
-                    load(factory, getFixturePath("js/.eslintrc.broken.js"));
+                    load(factory, "js/.eslintrc.broken.js");
                 }, /Cannot read config file/u);
             });
 
             it("should interpret parser module name when present in a JavaScript file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "node_modules/foo/index.js": "",
+                        "js/node_modules/foo/index.js": "",
+                        "js/.eslintrc.parser.js": `module.exports = {
+                            parser: 'foo',
+                            rules: { semi: [2, 'always'] }
+                        };`
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("js/.eslintrc.parser.js");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "js/.eslintrc.parser.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: path.resolve(getFixturePath("js/node_modules/foo/index.js")),
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
+                    parser: path.resolve("js/node_modules/foo/index.js"),
                     rules: {
                         semi: [2, "always"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should interpret parser path when present in a JavaScript file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "js/.eslintrc.parser2.js": `module.exports = {
+                            parser: './not-a-config.js',
+                            rules: { semi: [2, 'always'] }
+                        };`,
+                        "js/not-a-config.js": ""
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("js/.eslintrc.parser2.js");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "js/.eslintrc.parser2.js");
 
-                assert.deepStrictEqual(config, {
-                    parser: path.resolve(getFixturePath("js/not-a-config.js")),
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
+                    parser: path.resolve("js/not-a-config.js"),
                     rules: {
                         semi: [2, "always"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should interpret parser module name or path when parser is set to default parser in a JavaScript file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "js/.eslintrc.parser3.js": `module.exports = {
+                            parser: 'espree',
+                            rules: { semi: [2, 'always'] }
+                        };`
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("js/.eslintrc.parser3.js");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "js/.eslintrc.parser3.js");
 
-                assert.deepStrictEqual(config, {
+                assertConfig(config, {
                     parser: require.resolve("espree"),
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
                     rules: {
                         semi: [2, "always"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load information from a JSON file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "json/.eslintrc.json": "{ \"rules\": { \"quotes\": [2, \"double\"] } }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("json/.eslintrc.json");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "json/.eslintrc.json");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
+                assertConfig(config, {
                     rules: {
                         quotes: [2, "double"]
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load fresh information from a JSON file", () => {
+                const { fs, ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem();
                 const factory = new ConfigArrayFactory();
                 const initialConfig = {
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        env: {},
-                        globals: {},
-                        rules: {
-                            quotes: [2, "double"]
-                        },
-                        settings: {}
-                    },
-                    updatedConfig = {
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        env: {},
-                        globals: {},
-                        rules: {
-                            quotes: [0]
-                        },
-                        settings: {}
-                    },
-                    tmpFilename = "fresh-test.json",
-                    tmpFilePath = writeTempConfigFile(initialConfig, tmpFilename);
-                let config = load(factory, tmpFilePath);
+                    rules: {
+                        quotes: [2, "double"]
+                    }
+                };
+                const updatedConfig = {
+                    rules: {
+                        quotes: [0]
+                    }
+                };
+                let config;
 
-                assert.deepStrictEqual(config, initialConfig);
-                writeTempConfigFile(updatedConfig, tmpFilename, path.dirname(tmpFilePath));
-                config = load(factory, tmpFilePath);
-                assert.deepStrictEqual(config, updatedConfig);
+                fs.writeFileSync("fresh-test.json", JSON.stringify(initialConfig));
+                config = load(factory, "fresh-test.json");
+                assertConfig(config, initialConfig);
+
+                fs.writeFileSync("fresh-test.json", JSON.stringify(updatedConfig));
+                config = load(factory, "fresh-test.json");
+                assertConfig(config, updatedConfig);
             });
 
             it("should load information from a package.json file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "package-json/package.json": "{ \"eslintConfig\": { \"env\": { \"es6\": true } } }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("package-json/package.json");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "package-json/package.json");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: { es6: true },
-                    globals: {},
-                    rules: {},
-                    settings: {}
+                assertConfig(config, {
+                    env: { es6: true }
                 });
             });
 
             it("should throw error when loading invalid package.json file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "broken-package-json/package.json": "{ \"eslintConfig\": { \"env\": { \"es6\": true } }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
 
                 assert.throws(() => {
                     try {
-                        load(factory, getFixturePath("broken-package-json/package.json"));
+                        load(factory, "broken-package-json/package.json");
                     } catch (error) {
                         assert.strictEqual(error.messageTemplate, "failed-to-read-json");
                         throw error;
@@ -583,387 +1488,327 @@ describe("ConfigArrayFactory", () => {
             });
 
             it("should load fresh information from a package.json file", () => {
+                const { fs, ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem();
                 const factory = new ConfigArrayFactory();
                 const initialConfig = {
-                        eslintConfig: {
-                            parser: null,
-                            parserOptions: {},
-                            plugins: [],
-                            env: {},
-                            globals: {},
-                            rules: {
-                                quotes: [2, "double"]
-                            },
-                            settings: {}
+                    eslintConfig: {
+                        rules: {
+                            quotes: [2, "double"]
                         }
-                    },
-                    updatedConfig = {
-                        eslintConfig: {
-                            parser: null,
-                            parserOptions: {},
-                            plugins: [],
-                            env: {},
-                            globals: {},
-                            rules: {
-                                quotes: [0]
-                            },
-                            settings: {}
+                    }
+                };
+                const updatedConfig = {
+                    eslintConfig: {
+                        rules: {
+                            quotes: [0]
                         }
-                    },
-                    tmpFilename = "package.json",
-                    tmpFilePath = writeTempConfigFile(initialConfig, tmpFilename);
-                let config = load(factory, tmpFilePath);
+                    }
+                };
+                let config;
 
-                assert.deepStrictEqual(config, initialConfig.eslintConfig);
-                writeTempConfigFile(updatedConfig, tmpFilename, path.dirname(tmpFilePath));
-                config = load(factory, tmpFilePath);
-                assert.deepStrictEqual(config, updatedConfig.eslintConfig);
+                fs.writeFileSync("package.json", JSON.stringify(initialConfig));
+                config = load(factory, "package.json");
+                assertConfig(config, initialConfig.eslintConfig);
+
+                fs.writeFileSync("package.json", JSON.stringify(updatedConfig));
+                config = load(factory, "package.json");
+                assertConfig(config, updatedConfig.eslintConfig);
             });
 
             it("should load fresh information from a .eslintrc.js file", () => {
+                const { fs, ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem();
                 const factory = new ConfigArrayFactory();
                 const initialConfig = {
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        env: {},
-                        globals: {},
-                        rules: {
-                            quotes: [2, "double"]
-                        },
-                        settings: {}
-                    },
-                    updatedConfig = {
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        env: {},
-                        globals: {},
-                        rules: {
-                            quotes: [0]
-                        },
-                        settings: {}
-                    },
-                    tmpFilename = ".eslintrc.js",
-                    tmpFilePath = writeTempJsConfigFile(initialConfig, tmpFilename);
-                let config = load(factory, tmpFilePath);
+                    rules: {
+                        quotes: [2, "double"]
+                    }
+                };
+                const updatedConfig = {
+                    rules: {
+                        quotes: [0]
+                    }
+                };
+                let config;
 
-                assert.deepStrictEqual(config, initialConfig);
-                writeTempJsConfigFile(updatedConfig, tmpFilename, path.dirname(tmpFilePath));
-                config = load(factory, tmpFilePath);
-                assert.deepStrictEqual(config, updatedConfig);
+                fs.writeFileSync(".eslintrc.js", `module.exports = ${JSON.stringify(initialConfig)}`);
+                config = load(factory, ".eslintrc.js");
+                assertConfig(config, initialConfig);
+
+                fs.writeFileSync(".eslintrc.js", `module.exports = ${JSON.stringify(updatedConfig)}`);
+                config = load(factory, ".eslintrc.js");
+                assertConfig(config, updatedConfig);
             });
 
             it("should load information from a YAML file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "yaml/.eslintrc.yaml": "env:\n    browser: true"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("yaml/.eslintrc.yaml");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "yaml/.eslintrc.yaml");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: { browser: true },
-                    globals: {},
-                    rules: {},
-                    settings: {}
+                assertConfig(config, {
+                    env: { browser: true }
                 });
             });
 
-            it("should load information from a YAML file", () => {
-                const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("yaml/.eslintrc.empty.yaml");
-                const config = load(factory, configFilePath);
-
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: {},
-                    globals: {},
-                    rules: {},
-                    settings: {}
+            it("should load information from an empty YAML file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "yaml/.eslintrc.empty.yaml": "{}"
+                    }
                 });
+                const factory = new ConfigArrayFactory();
+                const config = load(factory, "yaml/.eslintrc.empty.yaml");
+
+                assertConfig(config, {});
             });
 
             it("should load information from a YML file", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "yml/.eslintrc.yml": "env:\n    node: true"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("yml/.eslintrc.yml");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "yml/.eslintrc.yml");
 
-                assert.deepStrictEqual(config, {
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    env: { node: true },
-                    globals: {},
-                    rules: {},
-                    settings: {}
+                assertConfig(config, {
+                    env: { node: true }
                 });
             });
 
             it("should load information from a YML file and apply extensions", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "extends/.eslintrc.yml": "extends: ../package-json/package.json\nrules:\n    booya: 2",
+                        "package-json/package.json": "{ \"eslintConfig\": { \"env\": { \"es6\": true } } }"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("extends/.eslintrc.yml");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "extends/.eslintrc.yml");
 
-                assert.deepStrictEqual(config, {
+                assertConfig(config, {
                     env: { es6: true },
-                    globals: {},
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
-                    rules: { booya: [2] },
-                    settings: {}
+                    rules: { booya: [2] }
                 });
             });
 
             it("should load information from `extends` chain.", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "extends-chain": {
+                            "node_modules/eslint-config-a": {
+                                "node_modules/eslint-config-b": {
+                                    "node_modules/eslint-config-c": {
+                                        "index.js": "module.exports = { rules: { c: 2 } };"
+                                    },
+                                    "index.js": "module.exports = { extends: 'c', rules: { b: 2 } };"
+                                },
+                                "index.js": "module.exports = { extends: 'b', rules: { a: 2 } };"
+                            },
+                            ".eslintrc.json": "{ \"extends\": \"a\" }"
+                        }
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("extends-chain/.eslintrc.json");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "extends-chain/.eslintrc.json");
 
-                assert.deepStrictEqual(config, {
-                    env: {},
-                    globals: {},
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     rules: {
                         a: [2], // from node_modules/eslint-config-a
                         b: [2], // from node_modules/eslint-config-a/node_modules/eslint-config-b
                         c: [2] // from node_modules/eslint-config-a/node_modules/eslint-config-b/node_modules/eslint-config-c
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load information from `extends` chain with relative path.", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "extends-chain-2": {
+                            "node_modules/eslint-config-a/index.js": "module.exports = { extends: './relative.js', rules: { a: 2 } };",
+                            "node_modules/eslint-config-a/relative.js": "module.exports = { rules: { relative: 2 } };",
+                            ".eslintrc.json": "{ \"extends\": \"a\" }"
+                        }
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("extends-chain-2/.eslintrc.json");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "extends-chain-2/.eslintrc.json");
 
-                assert.deepStrictEqual(config, {
-                    env: {},
-                    globals: {},
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     rules: {
                         a: [2], // from node_modules/eslint-config-a/index.js
                         relative: [2] // from node_modules/eslint-config-a/relative.js
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load information from `extends` chain in .eslintrc with relative path.", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "extends-chain-2": {
+                            "node_modules/eslint-config-a/index.js": "module.exports = { extends: './relative.js', rules: { a: 2 } };",
+                            "node_modules/eslint-config-a/relative.js": "module.exports = { rules: { relative: 2 } };",
+                            "relative.eslintrc.json": "{ \"extends\": \"./node_modules/eslint-config-a/index.js\" }"
+                        }
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("extends-chain-2/relative.eslintrc.json");
-                const config = load(factory, configFilePath);
+                const config = load(factory, "extends-chain-2/relative.eslintrc.json");
 
-                assert.deepStrictEqual(config, {
-                    env: {},
-                    globals: {},
-                    parser: null,
-                    parserOptions: {},
-                    plugins: [],
+                assertConfig(config, {
                     rules: {
                         a: [2], // from node_modules/eslint-config-a/index.js
                         relative: [2] // from node_modules/eslint-config-a/relative.js
-                    },
-                    settings: {}
+                    }
                 });
             });
 
             it("should load information from `parser` in .eslintrc with relative path.", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "extends-chain-2": {
+                            "parser.eslintrc.json": "{ \"parser\": \"./parser.js\" }",
+                            "parser.js": ""
+                        }
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("extends-chain-2/parser.eslintrc.json");
-                const config = load(factory, configFilePath);
-                const parserPath = getFixturePath("extends-chain-2/parser.js");
+                const config = load(factory, "extends-chain-2/parser.eslintrc.json");
 
-                assert.deepStrictEqual(config, {
-                    env: {},
-                    globals: {},
-                    parser: parserPath,
-                    parserOptions: {},
-                    plugins: [],
-                    rules: {},
-                    settings: {}
-                });
-            });
-
-            describe("even if it's in another directory,", () => {
-                let fixturePath = "";
-
-                before(() => {
-                    const tempDir = temp.mkdirSync("eslint-test-chain");
-                    const chain2 = getFixturePath("extends-chain-2");
-
-                    fixturePath = path.join(tempDir, "extends-chain-2");
-                    shell.cp("-r", chain2, fixturePath);
-                });
-
-                after(() => {
-                    temp.cleanupSync();
-                });
-
-                it("should load information from `extends` chain in .eslintrc with relative path.", () => {
-                    const factory = new ConfigArrayFactory();
-                    const configFilePath = path.join(fixturePath, "relative.eslintrc.json");
-                    const config = load(factory, configFilePath);
-
-                    assert.deepStrictEqual(config, {
-                        env: {},
-                        globals: {},
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        rules: {
-                            a: [2], // from node_modules/eslint-config-a/index.js
-                            relative: [2] // from node_modules/eslint-config-a/relative.js
-                        },
-                        settings: {}
-                    });
-                });
-
-                it("should load information from `parser` in .eslintrc with relative path.", () => {
-                    const factory = new ConfigArrayFactory();
-                    const configFilePath = path.join(fixturePath, "parser.eslintrc.json");
-                    const config = load(factory, configFilePath);
-                    const parserPath = path.join(fixturePath, "parser.js");
-
-                    assert.deepStrictEqual(config, {
-                        env: {},
-                        globals: {},
-                        parser: parserPath,
-                        parserOptions: {},
-                        plugins: [],
-                        rules: {},
-                        settings: {}
-                    });
+                assertConfig(config, {
+                    parser: path.resolve("extends-chain-2/parser.js")
                 });
             });
 
             describe("Plugins", () => {
                 it("should load information from a YML file and load plugins", () => {
-                    const stubbedFactory = createStubbedConfigArrayFactory({
-                        "eslint-plugin-test": {
-                            environments: {
-                                bar: { globals: { bar: true } }
-                            }
+                    const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                        files: {
+                            "node_modules/eslint-plugin-test/index.js": `
+                                module.exports = {
+                                    environments: {
+                                        bar: { globals: { bar: true } }
+                                    }
+                                }
+                            `,
+                            "plugins/.eslintrc.yml": `
+                                plugins:
+                                  - test
+                                rules:
+                                    test/foo: 2
+                                env:
+                                    test/bar: true
+                            `
                         }
                     });
-                    const configFilePath = getFixturePath("plugins/.eslintrc.yml");
-                    const config = load(stubbedFactory, configFilePath);
+                    const factory = new ConfigArrayFactory();
+                    const config = load(factory, "plugins/.eslintrc.yml");
 
-                    assert.deepStrictEqual(config, {
-                        parser: null,
-                        parserOptions: {},
+                    assertConfig(config, {
                         env: { "test/bar": true },
-                        globals: {},
                         plugins: ["test"],
                         rules: {
                             "test/foo": [2]
-                        },
-                        settings: {}
+                        }
                     });
                 });
 
                 it("should load two separate configs from a plugin", () => {
-                    const resolvedPath = path.resolve(PROJECT_PATH, "./node_modules/eslint-plugin-test/index.js");
-                    const stubbedFactory = createStubbedConfigArrayFactory({
-                        "eslint-plugin-test": resolvedPath,
-                        [resolvedPath]: {
-                            configs: {
-                                foo: { rules: { semi: 2, quotes: 1 } },
-                                bar: { rules: { quotes: 2, yoda: 2 } }
-                            }
+                    const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                        files: {
+                            "node_modules/eslint-plugin-test/index.js": `
+                                module.exports = {
+                                    configs: {
+                                        foo: { rules: { semi: 2, quotes: 1 } },
+                                        bar: { rules: { quotes: 2, yoda: 2 } }
+                                    }
+                                }
+                            `,
+                            "plugins/.eslintrc.yml": `
+                                extends:
+                                    - plugin:test/foo
+                                    - plugin:test/bar
+                            `
                         }
                     });
-                    const configFilePath = getFixturePath("plugins/.eslintrc2.yml");
-                    const config = load(stubbedFactory, configFilePath);
+                    const factory = new ConfigArrayFactory();
+                    const config = load(factory, "plugins/.eslintrc.yml");
 
-                    assert.deepStrictEqual(config, {
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
-                        globals: {},
-                        env: {},
+                    assertConfig(config, {
                         rules: {
                             semi: [2],
                             quotes: [2],
                             yoda: [2]
-                        },
-                        settings: {}
+                        }
                     });
                 });
             });
 
             describe("even if config files have Unicode BOM,", () => {
                 it("should read the JSON config file correctly.", () => {
+                    const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                        files: {
+                            "bom/.eslintrc.json": "\uFEFF{ \"rules\": { \"semi\": \"error\" } }"
+                        }
+                    });
                     const factory = new ConfigArrayFactory();
-                    const configFilePath = getFixturePath("bom/.eslintrc.json");
-                    const config = load(factory, configFilePath);
+                    const config = load(factory, "bom/.eslintrc.json");
 
-                    assert.deepStrictEqual(config, {
-                        env: {},
-                        globals: {},
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
+                    assertConfig(config, {
                         rules: {
                             semi: ["error"]
-                        },
-                        settings: {}
+                        }
                     });
                 });
 
                 it("should read the YAML config file correctly.", () => {
+                    const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                        files: {
+                            "bom/.eslintrc.yaml": "\uFEFFrules:\n  semi: error"
+                        }
+                    });
                     const factory = new ConfigArrayFactory();
-                    const configFilePath = getFixturePath("bom/.eslintrc.yaml");
-                    const config = load(factory, configFilePath);
+                    const config = load(factory, "bom/.eslintrc.yaml");
 
-                    assert.deepStrictEqual(config, {
-                        env: {},
-                        globals: {},
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
+                    assertConfig(config, {
                         rules: {
                             semi: ["error"]
-                        },
-                        settings: {}
+                        }
                     });
                 });
 
                 it("should read the config in package.json correctly.", () => {
+                    const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                        files: {
+                            "bom/package.json": "\uFEFF{ \"eslintConfig\": { \"rules\": { \"semi\": \"error\" } } }"
+                        }
+                    });
                     const factory = new ConfigArrayFactory();
-                    const configFilePath = getFixturePath("bom/package.json");
-                    const config = load(factory, configFilePath);
+                    const config = load(factory, "bom/package.json");
 
-                    assert.deepStrictEqual(config, {
-                        env: {},
-                        globals: {},
-                        parser: null,
-                        parserOptions: {},
-                        plugins: [],
+                    assertConfig(config, {
                         rules: {
                             semi: ["error"]
-                        },
-                        settings: {}
+                        }
                     });
                 });
             });
 
             it("throws an error including the config file name if the config file is invalid", () => {
+                const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                    files: {
+                        "invalid/invalid-top-level-property.yml": "invalidProperty: 3"
+                    }
+                });
                 const factory = new ConfigArrayFactory();
-                const configFilePath = getFixturePath("invalid/invalid-top-level-property.yml");
 
                 try {
-                    load(factory, configFilePath);
+                    load(factory, "invalid/invalid-top-level-property.yml");
                 } catch (err) {
-                    assert.include(err.message, `ESLint configuration in ${configFilePath} is invalid`);
+                    assert.include(err.message, `ESLint configuration in ${path.resolve("invalid/invalid-top-level-property.yml")} is invalid`);
                     return;
                 }
                 assert.fail();
@@ -971,136 +1816,97 @@ describe("ConfigArrayFactory", () => {
         });
 
         describe("resolve()", () => {
+            const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                cwd: () => tempDir,
+                files: {
+                    "node_modules/eslint-config-foo/index.js": "",
+                    "node_modules/eslint-config-foo/bar.js": "",
+                    "node_modules/eslint-config-eslint-configfoo/index.js": "",
+                    "node_modules/@foo/eslint-config/index.js": "",
+                    "node_modules/@foo/eslint-config-bar/index.js": "",
+                    "node_modules/eslint-plugin-foo/index.js": "exports.configs = { bar: {} }",
+                    "node_modules/@foo/eslint-plugin/index.js": "exports.configs = { bar: {} }",
+                    "node_modules/@foo/eslint-plugin-bar/index.js": "exports.configs = { baz: {} }",
+                    "foo/bar/.eslintrc": "",
+                    ".eslintrc": ""
+                }
+            });
+            const factory = new ConfigArrayFactory();
 
             /**
              * Resolve `extends` module.
-             * @param {ConfigArrayFactory} factory The factory.
              * @param {string} request The module name to resolve.
              * @param {string} [relativeTo] The importer path to resolve.
              * @returns {string} The resolved path.
              */
-            function resolve(factory, request, relativeTo) {
-                try {
-                    return factory.create(
-                        { extends: request },
-                        { filePath: relativeTo }
-                    )[0];
-                } catch (error) {
-
-                    // Ignore reading error because this is test for resolving.
-                    const m = /^Cannot read config file: (.+)/u.exec(error.message);
-
-                    if (!m) {
-                        throw error;
-                    }
-                    return { filePath: m[1] };
-                }
+            function resolve(request, relativeTo) {
+                return factory.create(
+                    { extends: request },
+                    { filePath: relativeTo }
+                )[0];
             }
 
             describe("Relative to CWD", () => {
-                leche.withData([
-                    ["./.eslintrc", path.resolve(".eslintrc")],
-                    ["eslint-config-foo", getProjectModulePath("eslint-config-foo")],
-                    ["foo", getProjectModulePath("eslint-config-foo")],
-                    ["eslint-configfoo", getProjectModulePath("eslint-config-eslint-configfoo")],
-                    ["@foo/eslint-config", getProjectModulePath("@foo/eslint-config")],
-                    ["@foo/bar", getProjectModulePath("@foo/eslint-config-bar")],
-                    ["plugin:foo/bar", getProjectModulePath("eslint-plugin-foo")]
-                ], (input, expected) => {
+                for (const { input, expected } of [
+                    { input: ".eslintrc", expected: path.resolve(tempDir, ".eslintrc") },
+                    { input: "eslint-config-foo", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/index.js") },
+                    { input: "eslint-config-foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/bar.js") },
+                    { input: "foo", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/index.js") },
+                    { input: "foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/bar.js") },
+                    { input: "eslint-configfoo", expected: path.resolve(tempDir, "node_modules/eslint-config-eslint-configfoo/index.js") },
+                    { input: "@foo/eslint-config", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config/index.js") },
+                    { input: "@foo", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config/index.js") },
+                    { input: "@foo/bar", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config-bar/index.js") },
+                    { input: "plugin:foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-plugin-foo/index.js") },
+                    { input: "plugin:@foo/bar", expected: path.resolve(tempDir, "node_modules/@foo/eslint-plugin/index.js") },
+                    { input: "plugin:@foo/bar/baz", expected: path.resolve(tempDir, "node_modules/@foo/eslint-plugin-bar/index.js") }
+                ]) {
                     it(`should return ${expected} when passed ${input}`, () => {
-                        const factory = createStubbedConfigArrayFactory({
-                            "./.eslintrc": path.resolve(".eslintrc"),
-                            "eslint-config-foo": getProjectModulePath("eslint-config-foo"),
-                            "eslint-config-eslint-configfoo": getProjectModulePath("eslint-config-eslint-configfoo"),
-                            "@foo/eslint-config": getProjectModulePath("@foo/eslint-config"),
-                            "@foo/eslint-config-bar": getProjectModulePath("@foo/eslint-config-bar"),
-                            "eslint-plugin-foo": getProjectModulePath("eslint-plugin-foo"),
-                            [path.resolve(".eslintrc")]: {},
-                            [getProjectModulePath("eslint-config-foo")]: {},
-                            [getProjectModulePath("eslint-config-eslint-configfoo")]: {},
-                            [getProjectModulePath("@foo/eslint-config")]: {},
-                            [getProjectModulePath("@foo/eslint-config-bar")]: {},
-                            [getProjectModulePath("eslint-plugin-foo")]: {
-                                configs: { bar: {} }
-                            }
-                        });
-                        const result = resolve(factory, input);
+                        const result = resolve(input);
 
                         assert.strictEqual(result.filePath, expected);
                     });
-                });
+                }
             });
 
             describe("Relative to config file", () => {
-                const relativePath = path.resolve("./foo/bar");
+                const relativePath = path.resolve(tempDir, "./foo/bar/.eslintrc");
 
-                leche.withData([
-                    ["./.eslintrc", path.resolve("./foo/bar", ".eslintrc"), relativePath],
-                    ["eslint-config-foo", getRelativeModulePath("eslint-config-foo", relativePath), relativePath],
-                    ["foo", getRelativeModulePath("eslint-config-foo", relativePath), relativePath],
-                    ["eslint-configfoo", getRelativeModulePath("eslint-config-eslint-configfoo", relativePath), relativePath],
-                    ["@foo/eslint-config", getRelativeModulePath("@foo/eslint-config", relativePath), relativePath],
-                    ["@foo/bar", getRelativeModulePath("@foo/eslint-config-bar", relativePath), relativePath],
-                    ["plugin:@foo/bar/baz", getProjectModulePath("@foo/eslint-plugin-bar"), relativePath]
-                ], (input, expected, relativeTo) => {
+                for (const { input, expected } of [
+                    { input: ".eslintrc", expected: path.join(path.dirname(relativePath), ".eslintrc") },
+                    { input: "eslint-config-foo", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/index.js") },
+                    { input: "eslint-config-foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/bar.js") },
+                    { input: "foo", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/index.js") },
+                    { input: "foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-config-foo/bar.js") },
+                    { input: "eslint-configfoo", expected: path.resolve(tempDir, "node_modules/eslint-config-eslint-configfoo/index.js") },
+                    { input: "@foo/eslint-config", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config/index.js") },
+                    { input: "@foo", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config/index.js") },
+                    { input: "@foo/bar", expected: path.resolve(tempDir, "node_modules/@foo/eslint-config-bar/index.js") },
+                    { input: "plugin:foo/bar", expected: path.resolve(tempDir, "node_modules/eslint-plugin-foo/index.js") },
+                    { input: "plugin:@foo/bar", expected: path.resolve(tempDir, "node_modules/@foo/eslint-plugin/index.js") },
+                    { input: "plugin:@foo/bar/baz", expected: path.resolve(tempDir, "node_modules/@foo/eslint-plugin-bar/index.js") }
+                ]) {
                     it(`should return ${expected} when passed ${input}`, () => {
-                        const factory = createStubbedConfigArrayFactory({
-                            "./.eslintrc": path.resolve("./foo/bar", ".eslintrc"),
-                            "eslint-config-foo": getRelativeModulePath("eslint-config-foo", relativePath),
-                            "eslint-config-eslint-configfoo": getRelativeModulePath("eslint-config-eslint-configfoo", relativePath),
-                            "@foo/eslint-config": getRelativeModulePath("@foo/eslint-config", relativePath),
-                            "@foo/eslint-config-bar": getRelativeModulePath("@foo/eslint-config-bar", relativePath),
-                            "@foo/eslint-plugin-bar": getProjectModulePath("@foo/eslint-plugin-bar"),
-                            [path.resolve("./foo/bar", ".eslintrc")]: {},
-                            [getRelativeModulePath("eslint-config-foo", relativePath)]: {},
-                            [getRelativeModulePath("eslint-config-eslint-configfoo", relativePath)]: {},
-                            [getRelativeModulePath("@foo/eslint-config", relativePath)]: {},
-                            [getRelativeModulePath("@foo/eslint-config-bar", relativePath)]: {},
-                            [getProjectModulePath("@foo/eslint-plugin-bar")]: {
-                                configs: { baz: {} }
-                            }
-                        });
-                        const result = resolve(factory, input, relativeTo);
+                        const result = resolve(input, relativePath);
 
                         assert.strictEqual(result.filePath, expected);
                     });
-                });
-
-                leche.withData([
-                    ["eslint-config-foo/bar", path.resolve("./node_modules", "eslint-config-foo/bar", "index.json"), relativePath],
-                    ["eslint-config-foo/bar", path.resolve("./node_modules", "eslint-config-foo", "bar.json"), relativePath],
-                    ["eslint-config-foo/bar", path.resolve("./node_modules", "eslint-config-foo/bar", "index.js"), relativePath],
-                    ["eslint-config-foo/bar", path.resolve("./node_modules", "eslint-config-foo", "bar.js"), relativePath]
-                ], (input, expected, relativeTo) => {
-                    it(`should return ${expected} when passed ${input}`, () => {
-                        const factory = createStubbedConfigArrayFactory({
-                            "eslint-config-foo/bar": expected,
-                            [expected]: {}
-                        });
-                        const result = resolve(factory, input, relativeTo);
-
-                        assert.strictEqual(result.filePath, expected);
-                    });
-                });
+                }
             });
         });
     });
 
     describe("Moved from tests/lib/config/plugins.js", () => {
         describe("load()", () => {
-            let stubbedFactory,
-                plugin,
-                scopedPlugin;
-
-            beforeEach(() => {
-                plugin = {};
-                scopedPlugin = {};
-                stubbedFactory = createStubbedConfigArrayFactory({
-                    "eslint-plugin-example": plugin,
-                    "@scope/eslint-plugin-example": scopedPlugin,
-                    "eslint-plugin-throws-on-load": Error("error thrown while loading this module")
-                });
+            const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                cwd: () => tempDir,
+                files: {
+                    "node_modules/@scope/eslint-plugin-example/index.js": "exports.name = '@scope/eslint-plugin-example';",
+                    "node_modules/eslint-plugin-example/index.js": "exports.name = 'eslint-plugin-example';",
+                    "node_modules/eslint-plugin-throws-on-load/index.js": "throw new Error('error thrown while loading this module')"
+                }
             });
+            const factory = new ConfigArrayFactory();
 
             /**
              * Load a plugin.
@@ -1108,7 +1914,7 @@ describe("ConfigArrayFactory", () => {
              * @returns {Map<string,Object>} The loaded plugins.
              */
             function load(request) {
-                const config = stubbedFactory.create({ plugins: [request] });
+                const config = factory.create({ plugins: [request] });
 
                 return new Map(
                     Object
@@ -1125,13 +1931,19 @@ describe("ConfigArrayFactory", () => {
             it("should load a plugin when referenced by short name", () => {
                 const loadedPlugins = load("example");
 
-                assert.strictEqual(loadedPlugins.get("example"), plugin);
+                assert.deepStrictEqual(
+                    loadedPlugins.get("example"),
+                    { name: "eslint-plugin-example" }
+                );
             });
 
             it("should load a plugin when referenced by long name", () => {
                 const loadedPlugins = load("eslint-plugin-example");
 
-                assert.strictEqual(loadedPlugins.get("example"), plugin);
+                assert.deepStrictEqual(
+                    loadedPlugins.get("example"),
+                    { name: "eslint-plugin-example" }
+                );
             });
 
             it("should throw an error when a plugin has whitespace", () => {
@@ -1173,13 +1985,19 @@ describe("ConfigArrayFactory", () => {
             it("should load a scoped plugin when referenced by short name", () => {
                 const loadedPlugins = load("@scope/example");
 
-                assert.strictEqual(loadedPlugins.get("@scope/example"), scopedPlugin);
+                assert.deepStrictEqual(
+                    loadedPlugins.get("@scope/example"),
+                    { name: "@scope/eslint-plugin-example" }
+                );
             });
 
             it("should load a scoped plugin when referenced by long name", () => {
                 const loadedPlugins = load("@scope/eslint-plugin-example");
 
-                assert.strictEqual(loadedPlugins.get("@scope/example"), scopedPlugin);
+                assert.deepStrictEqual(
+                    loadedPlugins.get("@scope/example"),
+                    { name: "@scope/eslint-plugin-example" }
+                );
             });
 
             describe("when referencing a scope plugin and omitting @scope/", () => {
@@ -1198,18 +2016,14 @@ describe("ConfigArrayFactory", () => {
         });
 
         describe("loadAll()", () => {
-            let stubbedFactory,
-                plugin1,
-                plugin2;
-
-            beforeEach(() => {
-                plugin1 = {};
-                plugin2 = {};
-                stubbedFactory = createStubbedConfigArrayFactory({
-                    "eslint-plugin-example1": plugin1,
-                    "eslint-plugin-example2": plugin2
-                });
+            const { ConfigArrayFactory } = defineConfigArrayFactoryWithInmemoryFileSystem({
+                cwd: () => tempDir,
+                files: {
+                    "node_modules/eslint-plugin-example1/index.js": "exports.name = 'eslint-plugin-example1';",
+                    "node_modules/eslint-plugin-example2/index.js": "exports.name = 'eslint-plugin-example2';"
+                }
             });
+            const factory = new ConfigArrayFactory();
 
             /**
              * Load a plugin.
@@ -1217,7 +2031,7 @@ describe("ConfigArrayFactory", () => {
              * @returns {Map<string,Object>} The loaded plugins.
              */
             function loadAll(request) {
-                const config = stubbedFactory.create({ plugins: request });
+                const config = factory.create({ plugins: request });
 
                 return new Map(
                     Object
@@ -1234,8 +2048,14 @@ describe("ConfigArrayFactory", () => {
             it("should load plugins when passed multiple plugins", () => {
                 const loadedPlugins = loadAll(["example1", "example2"]);
 
-                assert.strictEqual(loadedPlugins.get("example1"), plugin1);
-                assert.strictEqual(loadedPlugins.get("example2"), plugin2);
+                assert.deepStrictEqual(
+                    loadedPlugins.get("example1"),
+                    { name: "eslint-plugin-example1" }
+                );
+                assert.deepStrictEqual(
+                    loadedPlugins.get("example2"),
+                    { name: "eslint-plugin-example2" }
+                );
             });
         });
     });
